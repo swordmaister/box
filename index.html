@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Kekkai Master VR v3.0 - Quest 2</title>
+    <title>Kekkai Master VR v3.1 - Quest 2 (改良)</title>
     <style>
         body { margin: 0; overflow: hidden; background-color: #000; font-family: sans-serif; }
         canvas { display: block; width: 100%; height: 100%; }
@@ -57,8 +57,8 @@
         let controllerGrip1, controllerGrip2;
         const dolly = new THREE.Group();
         
-        const barriers = []; // { mesh, body, trappedObjects: [], isActive: bool }
-        const props = [];
+        const barriers = []; // { groupMesh, walls: [mesh], wallBodies: [body], trappedObjects: [], isActive: bool, boundingBox }
+        const props = []; // { mesh, body, isElevator }
         let playerBody;
         let activeElevator = null;
         let ghostBarrier = null;
@@ -75,6 +75,12 @@
         let isRightGripDown = false;
         let gripStartTime = 0;
         
+        // Player jump physics
+        let playerVelocityY = 0;
+        const GRAVITY = -9.82;
+        let canJump = true;
+        const GROUND_Y = 1.6; // base eye height
+
         // Configuration
         const SCALING_FACTOR = 100.0;
         const SPAWN_DISTANCE = 1.5;
@@ -87,7 +93,7 @@
         const modeDisplay = document.getElementById('mode-display');
         const infoText = document.getElementById('info-text');
         const timeStep = 1 / 72; // Quest 2は72Hz
-        const maxProps = 100;
+        const maxProps = 200;
 
         // Quest 2用の入力マップ
         let leftAxes = { x: 0, y: 0 };
@@ -109,7 +115,7 @@
 
             // Physics
             world = new CANNON.World();
-            world.gravity.set(0, -9.82, 0);
+            world.gravity.set(0, GRAVITY, 0);
             world.broadphase = new CANNON.SAPBroadphase(world);
             world.defaultContactMaterial.friction = 0.4;
             world.defaultContactMaterial.restitution = 0.3;
@@ -123,14 +129,14 @@
             groundBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
             world.addBody(groundBody);
 
-            // プレイヤーはキネマティックに変更（より正確な制御）
+            // プレイヤーはキネマティック（縦移動は手動で管理）
             playerBody = new CANNON.Body({ 
                 mass: 0,
                 type: CANNON.Body.KINEMATIC,
                 shape: new CANNON.Sphere(0.3),
                 material: physicsMat
             });
-            playerBody.position.set(0, 1.6, 0);
+            playerBody.position.set(0, GROUND_Y, 0);
             world.addBody(playerBody);
 
             // Renderer (Quest 2最適化)
@@ -220,17 +226,27 @@
             if (currentMode === MODE.BARRIER) {
                 modeDisplay.innerText = "🟦 結界師モード";
                 modeDisplay.className = "mode-barrier";
-                infoText.innerHTML = "左スティック:移動 | 右スティック:回転<br>トリガー:結界錬成 | グリップ:滅(圧縮爆発)<br>👏:モード切替";
+                infoText.innerHTML = "左スティック:移動 | 右スティック:回転<br>トリガー:結界(解=短押しで既存消去) | グリップ:滅(潰す)<br>👏:モード切替<br>A:ジャンプ";
             } else {
                 modeDisplay.innerText = "🟧 サンドボックス";
                 modeDisplay.className = "mode-sandbox";
-                infoText.innerHTML = "左スティック:移動 | 右スティック:回転<br>A/B/X:図形発射 | グリップ:破壊<br>👏:モード切替";
+                infoText.innerHTML = "左スティック:移動 | 右スティック:回転<br>A:球体発射 | B:エレベーター生成 | X:ピラミッド発射<br>グリップ:破壊/滅";
             }
         }
 
         // --- Event Handlers ---
-        function onRightTriggerStart() {
+        async function onRightTriggerStart() {
             isRightTriggerDown = true;
+
+            // トリガー短押し（選択）で既存結界を「解」する挙動を優先してチェック
+            if (currentMode === MODE.BARRIER && !isRightGripDown) {
+                const hitIndex = raycastBarrierIndex();
+                if (hitIndex !== -1) {
+                    performKaiOnBarrier(hitIndex); // 解：結界を消す（中のものは潰れない）
+                    return;
+                }
+            }
+
             if (currentMode === MODE.BARRIER && !isRightGripDown) {
                 startFormation();
             }
@@ -273,9 +289,11 @@
             const duration = performance.now() - gripStartTime;
             
             if (duration > 800) {
+                // 長押し：全消去（現行の挙動維持）
                 currentMode === MODE.BARRIER ? clearAllBarriers() : clearAllProps();
             } else {
-                performDestruction();
+                // 短押し：滅（対象結界を潰す）
+                performMetsu();
             }
         }
 
@@ -336,26 +354,31 @@
                             spawnProp('sphere');
                         } else {
                             // ジャンプ機能（結界モード）
-                            playerBody.position.y += 0.5;
+                            if (canJump) {
+                                playerVelocityY = 5.0; // 初速
+                                canJump = false;
+                            }
                         }
                         source.gamepad.buttons[4].wasPressed = true;
                     } else if (!source.gamepad.buttons[4]?.pressed && source.gamepad.buttons[4]) {
                         source.gamepad.buttons[4].wasPressed = false;
                     }
 
-                    // Bボタン (button[5])
+                    // Bボタン (button[5]) - サンドボックスではエレベーター生成
                     if (currentMode === MODE.SANDBOX) {
                         if (source.gamepad.buttons[5]?.pressed && !source.gamepad.buttons[5].wasPressed) {
-                            spawnProp('cylinder');
+                            spawnProp('elevator');
                             source.gamepad.buttons[5].wasPressed = true;
                         } else if (!source.gamepad.buttons[5]?.pressed && source.gamepad.buttons[5]) {
                             source.gamepad.buttons[5].wasPressed = false;
                         }
+                    } else {
+                        // バリアモードではBに特別な挙動無し
                     }
                 }
             }
 
-            // 移動処理（左スティック）
+            // 移動処理（左スティック） — 前後左右で正面を向いたまま動く
             if (Math.abs(leftAxes.x) > 0.15 || Math.abs(leftAxes.y) > 0.15) {
                 const angle = dolly.rotation.y;
                 const forward = new THREE.Vector3(
@@ -376,6 +399,15 @@
 
                 playerBody.position.x += moveVec.x;
                 playerBody.position.z += moveVec.z;
+
+                // エレベーター上で上下操作（プレイヤーがエレベーター上にいる場合）
+                if (activeElevator) {
+                    // leftAxes.yを使って上下
+                    const vy = leftAxes.y * 2.0;
+                    activeElevator.body.position.y += vy * timeStep;
+                    activeElevator.mesh.position.copy(activeElevator.body.position);
+                    // エレベーターに乗っているオブジェクトも上に移動さ                    // handled in render loop by sync
+                }
             }
 
             // 回転処理（右スティック）
@@ -384,7 +416,7 @@
             }
         }
 
-        // --- Barrier Logic ---
+        // --- Barrier Logic (6面の壁で囲う) ---
         function startFormation() {
             const worldPos = new THREE.Vector3();
             const worldQuat = new THREE.Quaternion();
@@ -401,7 +433,7 @@
             const mat = new THREE.MeshBasicMaterial({ 
                 color: 0x00FFFF, 
                 transparent: true, 
-                opacity: 0.3, 
+                opacity: 0.25, 
                 wireframe: true 
             });
             ghostBarrier = new THREE.Mesh(geo, mat);
@@ -420,64 +452,170 @@
             const scaleY = Math.max(0.2, Math.abs(delta.y) * SCALING_FACTOR);
             const scaleZ = Math.max(0.2, Math.abs(delta.z) * SCALING_FACTOR);
 
-            ghostBarrier.scale.set(scaleX, scaleY, scaleZ);
+            // clamp to reasonable
+            ghostBarrier.scale.set(
+                Math.min(scaleX, 10),
+                Math.min(scaleY, 6),
+                Math.min(scaleZ, 10)
+            );
         }
 
         function finishFormation() {
             if (!ghostBarrier) return;
             
-            const size = ghostBarrier.scale.clone();
+            const size = new THREE.Vector3(ghostBarrier.scale.x, ghostBarrier.scale.y, ghostBarrier.scale.z);
             const pos = ghostBarrier.position.clone();
             const rot = ghostBarrier.quaternion.clone();
-            
-            // ★当たり判定なしの視覚的な結界
-            const geo = new THREE.BoxGeometry(size.x, size.y, size.z);
-            const mat = new THREE.MeshPhongMaterial({ 
-                color: 0x0088FF, 
-                transparent: true, 
-                opacity: 0.3, // より透明に
-                emissive: 0x001133,
+
+            // Create a group for barrier visuals
+            const barrierGroup = new THREE.Group();
+            barrierGroup.position.copy(pos);
+            barrierGroup.quaternion.copy(rot);
+
+            // Wall visual material
+            const wallMat = new THREE.MeshPhongMaterial({
+                color: 0x0088FF,
+                transparent: true,
+                opacity: 0.35,
                 side: THREE.DoubleSide
             });
-            const mesh = new THREE.Mesh(geo, mat);
-            mesh.position.copy(pos);
-            mesh.quaternion.copy(rot);
-            
-            const edges = new THREE.LineSegments(
-                new THREE.EdgesGeometry(geo), 
-                new THREE.LineBasicMaterial({ color: 0x00FFFF, linewidth: 2 })
-            );
-            mesh.add(edges);
-            scene.add(mesh);
 
-            // ★閉じ込められたオブジェクトを検出
+            const wallMeshes = [];
+            const wallBodies = [];
+
+            // wall thickness
+            const t = 0.12;
+            // half sizes
+            const hx = size.x / 2;
+            const hy = size.y / 2;
+            const hz = size.z / 2;
+
+            // helper to create wall at offset
+            function createWall(w, h, d, ox, oy, oz) {
+                const geo = new THREE.BoxGeometry(w, h, d);
+                const mesh = new THREE.Mesh(geo, wallMat.clone());
+                mesh.position.set(ox, oy, oz);
+                barrierGroup.add(mesh);
+
+                // physics body (static)
+                const half = new CANNON.Vec3(w/2, h/2, d/2);
+                const box = new CANNON.Box(half);
+                const body = new CANNON.Body({ mass: 0 });
+                body.addShape(box);
+                // compute world position for this wall
+                const localPos = new THREE.Vector3(ox, oy, oz).applyQuaternion(rot).add(pos);
+                body.position.set(localPos.x, localPos.y, localPos.z);
+                // set quaternion
+                const q = rot;
+                body.quaternion.set(q.x, q.y, q.z, q.w);
+                world.addBody(body);
+
+                wallMeshes.push(mesh);
+                wallBodies.push(body);
+            }
+
+            // Create 6 walls: +X, -X, +Y, -Y, +Z, -Z (slightly inset so interior is hollow)
+            createWall(t, size.y, size.z + t*2, hx + t/2, 0, 0); // +X
+            createWall(t, size.y, size.z + t*2, -hx - t/2, 0, 0); // -X
+            createWall(size.x + t*2, t, size.z + t*2, 0, hy + t/2, 0); // +Y (ceiling)
+            createWall(size.x + t*2, t, size.z + t*2, 0, -hy - t/2, 0); // -Y (floor)
+            createWall(size.x + t*2, size.y, t, 0, 0, hz + t/2); // +Z
+            createWall(size.x + t*2, size.y, t, 0, 0, -hz - t/2); // -Z
+
+            // Compute bounding box for quick containment test (outer bounds)
+            const boundingBox = new THREE.Box3().setFromObject(barrierGroup);
+
+            // Detect trapped props inside (by position)
             const trappedObjects = [];
-            const barrierBox = new THREE.Box3().setFromObject(mesh);
-            
             props.forEach(prop => {
-                const propPos = new THREE.Vector3().copy(prop.body.position);
-                if (barrierBox.containsPoint(propPos)) {
+                const p = new THREE.Vector3().copy(prop.body.position);
+                if (boundingBox.containsPoint(p)) {
                     trappedObjects.push(prop);
-                    // 閉じ込められた印（色変更）
-                    prop.mesh.material.emissive = new THREE.Color(0xff0000);
-                    prop.mesh.material.emissiveIntensity = 0.5;
+                    // mark visually
+                    if (prop.mesh.material && prop.mesh.material.emissive !== undefined) {
+                        prop.mesh.material.emissive = new THREE.Color(0xff0000);
+                        prop.mesh.material.emissiveIntensity = 0.5;
+                    }
                 }
             });
 
-            barriers.push({ 
-                mesh, 
-                body: null, // 当たり判定なし
+            // Add group to scene
+            scene.add(barrierGroup);
+
+            barriers.push({
+                groupMesh: barrierGroup,
+                walls: wallMeshes,
+                wallBodies: wallBodies,
                 trappedObjects: trappedObjects,
                 isActive: true,
-                boundingBox: barrierBox
+                boundingBox: boundingBox
             });
-            
+
+            // remove ghost
             scene.remove(ghostBarrier);
             ghostBarrier = null;
         }
 
-        // --- Destruction (圧縮爆発) ---
-        function performDestruction() {
+        // --- 解 (Kai) : 結界を消すが中のものは残す ---
+        function performKaiOnBarrier(index) {
+            const b = barriers[index];
+            if (!b) return;
+            // remove wall bodies and visuals, but keep trapped objects intact
+            b.wallBodies.forEach(wb => {
+                try { world.removeBody(wb); } catch (e) {}
+            });
+            b.walls.forEach(wm => {
+                if (wm.parent) wm.parent.remove(wm);
+            });
+            if (b.groupMesh.parent) scene.remove(b.groupMesh);
+            // reset trapped visuals
+            b.trappedObjects.forEach(p => {
+                if (p.mesh && p.mesh.material) {
+                    p.mesh.material.emissive = new THREE.Color(0x000000);
+                    p.mesh.material.emissiveIntensity = 0;
+                }
+            });
+            barriers.splice(index, 1);
+        }
+
+        // --- 滅 (Metsu) : 結界に対して潰す（中のものを削除） ---
+        function performMetsu() {
+            // レイで結界を狙う
+            const hitIndex = raycastBarrierIndex();
+            if (hitIndex === -1) return;
+
+            const barrier = barriers[hitIndex];
+            if (!barrier) return;
+
+            // slam effect: 下方向にエフェクト（ここでは視覚・音の代わりに簡単処理）
+            // 潰す：中のオブジェクト（trappedObjects）を完全に削除する
+            barrier.trappedObjects.forEach(p => {
+                try {
+                    scene.remove(p.mesh);
+                    world.removeBody(p.body);
+                } catch (e) {}
+                // also remove from props array
+                const pi = props.findIndex(x => x === p);
+                if (pi !== -1) props.splice(pi, 1);
+            });
+
+            // remove walls/bodies/visuals
+            barrier.wallBodies.forEach(wb => {
+                try { world.removeBody(wb); } catch (e) {}
+            });
+            if (barrier.groupMesh.parent) scene.remove(barrier.groupMesh);
+
+            // small visual flash on controller ray
+            if (destructionRay) {
+                destructionRay.material.opacity = 1.0;
+                setTimeout(()=>{ if (destructionRay) destructionRay.material.opacity = 0; }, 150);
+            }
+
+            barriers.splice(hitIndex, 1);
+        }
+
+        // Raycast utility to find barrier under controller2
+        function raycastBarrierIndex() {
             const worldPos = new THREE.Vector3();
             const worldQuat = new THREE.Quaternion();
             controller2.getWorldPosition(worldPos);
@@ -486,121 +624,25 @@
             const raycaster = new THREE.Raycaster();
             raycaster.ray.origin.copy(worldPos);
             raycaster.ray.direction.set(0, 0, -1).applyQuaternion(worldQuat);
-            raycaster.far = 20;
+            raycaster.far = 30;
 
-            if (currentMode === MODE.BARRIER) {
-                // 結界を狙って圧縮爆発
-                const barrierMeshes = barriers.map(b => b.mesh);
-                const intersects = raycaster.intersectObjects(barrierMeshes, true);
-
-                if (intersects.length > 0) {
-                    const hit = intersects[0].object;
-                    const parent = hit.parent?.type === 'Mesh' ? hit.parent : hit;
-                    const index = barriers.findIndex(b => b.mesh === parent || b.mesh === hit);
-                    
-                    if (index > -1) {
-                        const barrier = barriers[index];
-                        
-                        // ★圧縮爆発エフェクト
-                        compressAndExplode(barrier);
-                        
-                        // 結界削除
-                        scene.remove(barrier.mesh);
-                        barriers.splice(index, 1);
-                        
-                        // 破壊エフェクト
-                        if (destructionRay) {
-                            destructionRay.material.opacity = 1.0;
-                            setTimeout(() => {
-                                if (destructionRay) destructionRay.material.opacity = isRightGripDown ? 0.6 : 0;
-                            }, 100);
-                        }
-                    }
-                }
-            } else {
-                // サンドボックスモードは通常の破壊
-                const meshes = props.map(t => t.mesh);
-                const intersects = raycaster.intersectObjects(meshes, true);
-
-                if (intersects.length > 0) {
-                    const hit = intersects[0].object;
-                    const index = props.findIndex(p => p.mesh === hit);
-                    
-                    if (index > -1) {
-                        const obj = props[index];
-                        scene.remove(obj.mesh);
-                        world.removeBody(obj.body);
-                        props.splice(index, 1);
-                    }
-                }
-            }
+            // check intersects against barrier groupMeshes
+            const meshes = barriers.map(b => b.groupMesh);
+            const intersects = raycaster.intersectObjects(meshes, true);
+            if (intersects.length === 0) return -1;
+            // find which barrier contains the intersected object
+            const hit = intersects[0].object;
+            const parentGroup = meshes.find(m => hit === m || m.children.includes(hit) || m.getObjectById(hit.id));
+            const idx = barriers.findIndex(b => b.groupMesh === parentGroup);
+            return idx;
         }
 
-        // ★圧縮爆発機能
-        function compressAndExplode(barrier) {
-            const center = barrier.mesh.position.clone();
-            const trapped = barrier.trappedObjects;
-            
-            if (trapped.length === 0) return;
-
-            // 圧縮フェーズ（0.3秒）
-            const compressDuration = 300;
-            const startTime = performance.now();
-            
-            const compressionInterval = setInterval(() => {
-                const elapsed = performance.now() - startTime;
-                const progress = Math.min(elapsed / compressDuration, 1);
-                
-                trapped.forEach(prop => {
-                    if (!prop.body || !prop.mesh) return;
-                    
-                    // 中心に向かって引き寄せる
-                    const toCenter = new THREE.Vector3().subVectors(center, prop.body.position);
-                    const force = toCenter.multiplyScalar(progress * 20);
-                    prop.body.velocity.copy(force);
-                    
-                    // 縮小エフェクト
-                    const scale = 1 - progress * 0.5;
-                    prop.mesh.scale.setScalar(scale);
-                });
-                
-                if (progress >= 1) {
-                    clearInterval(compressionInterval);
-                    // 爆発フェーズ
-                    explodeTrappedObjects(trapped, center);
-                }
-            }, 16);
-        }
-
-        function explodeTrappedObjects(trapped, center) {
-            trapped.forEach(prop => {
-                if (!prop.body || !prop.mesh) return;
-                
-                // 爆発方向
-                const explosionDir = new THREE.Vector3().subVectors(prop.body.position, center).normalize();
-                const explosionForce = explosionDir.multiplyScalar(30 + Math.random() * 20);
-                
-                prop.body.velocity.copy(explosionForce);
-                prop.body.angularVelocity.set(
-                    (Math.random() - 0.5) * 20,
-                    (Math.random() - 0.5) * 20,
-                    (Math.random() - 0.5) * 20
-                );
-                
-                // スケールを元に戻す
-                prop.mesh.scale.setScalar(1);
-                
-                // エミッシブをリセット
-                prop.mesh.material.emissive = new THREE.Color(0x000000);
-                prop.mesh.material.emissiveIntensity = 0;
-            });
-        }
-
-        // --- Sandbox Props ---
+        // --- Sandbox: 落とす / 生成 / エレベーター ---
         function spawnProp(type) {
             const size = 0.4;
             let geo, shape, body;
-            const color = Math.random() * 0xFFFFFF;
+            let mass = 20;
+            const color = Math.floor(Math.random() * 0xFFFFFF);
 
             const worldPos = new THREE.Vector3();
             const worldQuat = new THREE.Quaternion();
@@ -610,14 +652,24 @@
             const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(worldQuat);
             const spawnP = worldPos.clone().add(dir.clone().multiplyScalar(2.0));
 
+            let isElevator = false;
+
             if (type === 'sphere') {
                 geo = new THREE.SphereGeometry(size);
                 shape = new CANNON.Sphere(size);
+            } else if (type === 'elevator') {
+                // elevator: kinematic box/cylinder
+                geo = new THREE.BoxGeometry(size*2, 0.2, size*2);
+                // use box physics
+                shape = new CANNON.Box(new CANNON.Vec3(size, 0.1, size));
+                mass = 0; // kinematic (we'll move manually)
+                isElevator = true;
             } else if (type === 'cylinder') {
                 geo = new THREE.CylinderGeometry(size, size, size * 2, 16);
                 shape = new CANNON.Cylinder(size, size, size * 2, 16);
             } else if (type === 'pyramid') {
                 geo = new THREE.ConeGeometry(size, size * 2, 4);
+                // approximate pyramid as cylinder shape for physics
                 shape = new CANNON.Cylinder(0, size, size * 2, 4);
             }
 
@@ -626,29 +678,35 @@
             mesh.position.copy(spawnP);
             scene.add(mesh);
 
-            body = new CANNON.Body({ mass: 20, shape: shape });
+            body = new CANNON.Body({ mass: mass });
+            body.addShape(shape);
             body.position.copy(spawnP);
-            body.velocity.set(dir.x * 10, dir.y * 10 + 2, dir.z * 10);
-            body.angularVelocity.set(
-                (Math.random() - 0.5) * 2, 
-                (Math.random() - 0.5) * 2, 
-                (Math.random() - 0.5) * 2
-            );
+            if (!isElevator) {
+                body.velocity.set(dir.x * 8, dir.y * 6 + 2, dir.z * 8);
+                body.angularVelocity.set(
+                    (Math.random() - 0.5) * 2, 
+                    (Math.random() - 0.5) * 2, 
+                    (Math.random() - 0.5) * 2
+                );
+            } else {
+                body.type = CANNON.Body.KINEMATIC;
+            }
             world.addBody(body);
 
-            props.push({ mesh, body });
+            const pObj = { mesh, body, isElevator: isElevator };
+            props.push(pObj);
             
             if (props.length > maxProps) {
                 const old = props.shift();
                 scene.remove(old.mesh);
-                world.removeBody(old.body);
+                try { world.removeBody(old.body); } catch (e) {}
             }
         }
 
         function clearAllBarriers() {
             barriers.forEach(b => {
-                scene.remove(b.mesh);
-                if (b.body) world.removeBody(b.body);
+                try { b.wallBodies.forEach(wb => world.removeBody(wb)); } catch (e) {}
+                if (b.groupMesh.parent) scene.remove(b.groupMesh);
             });
             barriers.length = 0;
         }
@@ -656,7 +714,7 @@
         function clearAllProps() {
             props.forEach(p => {
                 scene.remove(p.mesh);
-                world.removeBody(p.body);
+                try { world.removeBody(p.body); } catch (e) {}
             });
             props.length = 0;
         }
@@ -672,21 +730,89 @@
         }
 
         function render() {
+            // physics step for dynamic bodies (kinematic positions set manually)
             world.step(timeStep);
+
             handleControllerInput();
 
+            // Update formation while holding trigger
             if (currentMode === MODE.BARRIER && isRightTriggerDown && ghostBarrier && !isRightGripDown) {
                 updateFormation(controller2.position);
             }
 
+            // Sync props meshes with physics bodies
             props.forEach(p => {
-                if (p.body && p.mesh) {
-                    p.mesh.position.copy(p.body.position);
-                    p.mesh.quaternion.copy(p.body.quaternion);
-                }
+                if (!p.body || !p.mesh) return;
+                // For kinematic elevator, body position may be moved directly
+                p.mesh.position.copy(p.body.position);
+                p.mesh.quaternion.copy(p.body.quaternion);
             });
-            
+
+            // Update player vertical physics (jump + gravity)
+            playerVelocityY += GRAVITY * timeStep;
+            playerBody.position.y += playerVelocityY * timeStep;
+
+            if (playerBody.position.y <= GROUND_Y) {
+                playerBody.position.y = GROUND_Y;
+                playerVelocityY = 0;
+                canJump = true;
+            }
+
+            // Dolly follows player (camera height accounted for)
             dolly.position.copy(playerBody.position);
+
+            // Detect if player stands on an elevator to activate it
+            activeElevator = null;
+            for (const p of props) {
+                if (!p.isElevator) continue;
+                // compute bounding box of elevator mesh
+                const bb = new THREE.Box3().setFromObject(p.mesh);
+                const playerPos = new THREE.Vector3().copy(playerBody.position);
+                // check if player's feet (y slightly below playerBody) are within elevator AABB
+                if (playerPos.x > bb.min.x && playerPos.x < bb.max.x &&
+                    playerPos.z > bb.min.z && playerPos.z < bb.max.z &&
+                    Math.abs(playerPos.y - p.mesh.position.y) < 0.6) {
+                    activeElevator = p;
+                    break;
+                }
+            }
+
+            // If an elevator is active and left stick up/down applied, move it (handled in handleControllerInput)
+            // Also ensure any objects standing on elevator go up/down with it
+            if (activeElevator) {
+                // Propagate elevator movement to any props that are resting near its top
+                const topY = activeElevator.mesh.position.y + 0.15;
+                // find props that are on elevator surface (within small epsilon)
+                props.forEach(other => {
+                    if (other === activeElevator) return;
+                    const dx = other.body.position.x - activeElevator.body.position.x;
+                    const dz = other.body.position.z - activeElevator.body.position.z;
+                    const withinX = Math.abs(dx) < 1.2;
+                    const withinZ = Math.abs(dz) < 1.2;
+                    const onTop = Math.abs(other.body.position.y - topY) < 0.3;
+                    if (withinX && withinZ && onTop) {
+                        // match y to elevator
+                        other.body.position.y = topY + 0.05;
+                        other.mesh.position.copy(other.body.position);
+                    }
+                });
+                // if player stands on it, keep the player's y synced to elevator top when elevator moves
+                if (activeElevator) {
+                    const top = activeElevator.body.position.y + 0.15;
+                    // if player close enough horizontally and on top
+                    const pp = playerBody.position;
+                    const ex = activeElevator.body.position.x, ez = activeElevator.body.position.z;
+                    if (Math.abs(pp.x - ex) < 1.2 && Math.abs(pp.z - ez) < 1.2 && Math.abs(pp.y - top) < 0.8) {
+                        playerBody.position.y = top + 0.9; // eye height
+                    }
+                }
+            }
+
+            // If a barrier exists, update its bounding boxes (static so usually not necessary)
+            barriers.forEach(b => {
+                // keep boundingBox current (in case elevator/props moved)
+                b.boundingBox = new THREE.Box3().setFromObject(b.groupMesh);
+            });
 
             renderer.render(scene, camera);
         }
