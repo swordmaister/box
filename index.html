@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Kekkai Master VR v2.2</title>
+    <title>Kekkai Master VR v3.0 - Quest 2</title>
     <style>
         body { margin: 0; overflow: hidden; background-color: #000; font-family: sans-serif; }
         canvas { display: block; width: 100%; height: 100%; }
@@ -31,7 +31,7 @@
     <div id="ui-layer">
         <div id="mode-display" class="mode-barrier">🟦 結界師モード</div>
         <div id="controls-info">
-            <div id="info-text">初期化中...</div>
+            <div id="info-text">Quest 2 初期化中...</div>
         </div>
     </div>
 
@@ -57,7 +57,7 @@
         let controllerGrip1, controllerGrip2;
         const dolly = new THREE.Group();
         
-        const barriers = [];
+        const barriers = []; // { mesh, body, trappedObjects: [], isActive: bool }
         const props = [];
         let playerBody;
         let activeElevator = null;
@@ -78,16 +78,20 @@
         // Configuration
         const SCALING_FACTOR = 100.0;
         const SPAWN_DISTANCE = 1.5;
-        const MOVE_SPEED = 0.08; // ★フレーム単位の移動速度に変更
-        const TURN_SPEED = 2.0;
+        const MOVE_SPEED = 3.5; // Quest 2用に調整
+        const TURN_SPEED = 1.5;
 
         let canSwitchMode = true;
-        const clapThreshold = 0.25; // ★判定距離を少し広げた
+        const clapThreshold = 0.25;
 
         const modeDisplay = document.getElementById('mode-display');
         const infoText = document.getElementById('info-text');
-        const timeStep = 1 / 60;
+        const timeStep = 1 / 72; // Quest 2は72Hz
         const maxProps = 100;
+
+        // Quest 2用の入力マップ
+        let leftAxes = { x: 0, y: 0 };
+        let rightAxes = { x: 0, y: 0 };
 
         init();
         animate();
@@ -99,7 +103,7 @@
             scene.fog = new THREE.FogExp2(0x101020, 0.02);
 
             camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
-            dolly.position.set(0, 1.6, 0);
+            dolly.position.set(0, 0, 0);
             dolly.add(camera);
             scene.add(dolly);
 
@@ -107,14 +111,10 @@
             world = new CANNON.World();
             world.gravity.set(0, -9.82, 0);
             world.broadphase = new CANNON.SAPBroadphase(world);
+            world.defaultContactMaterial.friction = 0.4;
+            world.defaultContactMaterial.restitution = 0.3;
             
-            const physicsMat = new CANNON.Material();
-            const contactMat = new CANNON.ContactMaterial(physicsMat, physicsMat, { 
-                friction: 0.4, 
-                restitution: 0.3 
-            });
-            world.addContactMaterial(contactMat);
-
+            const physicsMat = new CANNON.Material('ground');
             const groundBody = new CANNON.Body({ 
                 mass: 0, 
                 shape: new CANNON.Plane(), 
@@ -123,21 +123,23 @@
             groundBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
             world.addBody(groundBody);
 
+            // プレイヤーはキネマティックに変更（より正確な制御）
             playerBody = new CANNON.Body({ 
-                mass: 70, 
-                shape: new CANNON.Sphere(0.3), 
-                material: physicsMat, 
-                fixedRotation: true,
-                linearDamping: 0.9 // ★減衰を追加
+                mass: 0,
+                type: CANNON.Body.KINEMATIC,
+                shape: new CANNON.Sphere(0.3),
+                material: physicsMat
             });
-            playerBody.position.set(0, 5, 0);
+            playerBody.position.set(0, 1.6, 0);
             world.addBody(playerBody);
 
-            // Renderer
+            // Renderer (Quest 2最適化)
             renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.xr.enabled = true;
             renderer.xr.setReferenceSpaceType('local-floor');
+            renderer.xr.setFramebufferScaleFactor(1.0); // Quest 2用
             document.body.appendChild(renderer.domElement);
             document.body.appendChild(VRButton.createButton(renderer));
 
@@ -146,7 +148,6 @@
             scene.add(hemiLight);
             const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
             dirLight.position.set(10, 20, 10);
-            dirLight.castShadow = true;
             scene.add(dirLight);
 
             const gridHelper = new THREE.GridHelper(50, 50, 0x00ffff, 0x222222);
@@ -217,13 +218,13 @@
 
         function updateUI() {
             if (currentMode === MODE.BARRIER) {
-                modeDisplay.innerText = "🟦 結界師モード (感度x100)";
+                modeDisplay.innerText = "🟦 結界師モード";
                 modeDisplay.className = "mode-barrier";
-                infoText.innerHTML = "トリガー:錬成 | トリガー+グリップ:エレベーター(長押し)<br>グリップ:滅/解 | 👏:モード切替";
+                infoText.innerHTML = "左スティック:移動 | 右スティック:回転<br>トリガー:結界錬成 | グリップ:滅(圧縮爆発)<br>👏:モード切替";
             } else {
                 modeDisplay.innerText = "🟧 サンドボックス";
                 modeDisplay.className = "mode-sandbox";
-                infoText.innerHTML = "右A/B/左X:図形発射 | グリップ:破壊<br>👏:モード切替";
+                infoText.innerHTML = "左スティック:移動 | 右スティック:回転<br>A/B/X:図形発射 | グリップ:破壊<br>👏:モード切替";
             }
         }
 
@@ -274,7 +275,7 @@
             if (duration > 800) {
                 currentMode === MODE.BARRIER ? clearAllBarriers() : clearAllProps();
             } else {
-                if (!activeElevator) performDestruction();
+                performDestruction();
             }
         }
 
@@ -282,7 +283,7 @@
             const session = renderer.xr.getSession();
             if (!session) return;
 
-            // ★Mode Switch (Clap) - ワールド座標で判定
+            // Mode Switch (Clap)
             const worldPos1 = new THREE.Vector3();
             const worldPos2 = new THREE.Vector3();
             controller1.getWorldPosition(worldPos1);
@@ -298,102 +299,51 @@
                 canSwitchMode = true;
             }
 
-            // Elevator Logic
-            if (currentMode === MODE.BARRIER) {
-                if (isRightTriggerDown && isRightGripDown) {
-                    if (ghostBarrier) {
-                        scene.remove(ghostBarrier);
-                        ghostBarrier = null;
-                    }
-                    
-                    if (!activeElevator) {
-                        startElevator();
-                    }
-                    
-                    if (activeElevator) {
-                        activeElevator.body.velocity.set(0, 4.0, 0);
-                    }
-                } else if (activeElevator && !(isRightTriggerDown && isRightGripDown)) {
-                    activeElevator.body.velocity.set(0, 0, 0);
-                }
-            }
-
-            // ★Gamepad polling - 移動処理を改善
+            // Gamepad Input (Quest 2)
             for (const source of session.inputSources) {
                 if (!source.gamepad) continue;
 
-                // 左手: 移動
+                // 左手コントローラー
                 if (source.handedness === 'left') {
-                    const axes = source.gamepad.axes;
-                    if (axes.length >= 4) {
-                        const x = axes[2]; // 左右
-                        const y = axes[3]; // 前後
-                        
-                        if (Math.abs(x) > 0.1 || Math.abs(y) > 0.1) {
-                            // dollyの向きを基準に移動ベクトル計算
-                            const angle = dolly.rotation.y;
-                            const fwd = new THREE.Vector3(
-                                Math.sin(angle), 
-                                0, 
-                                Math.cos(angle)
-                            );
-                            const right = new THREE.Vector3(
-                                Math.cos(angle), 
-                                0, 
-                                -Math.sin(angle)
-                            );
-                            
-                            // ★移動方向を計算 (yは前方が負なので反転)
-                            const moveDir = new THREE.Vector3();
-                            moveDir.addScaledVector(right, x);
-                            moveDir.addScaledVector(fwd, -y);
-                            moveDir.normalize();
-                            
-                            // ★物理ボディに直接力を加える
-                            const force = moveDir.multiplyScalar(MOVE_SPEED);
-                            playerBody.velocity.x = force.x;
-                            playerBody.velocity.z = force.z;
-                        } else {
-                            // スティックを離したら減速
-                            playerBody.velocity.x *= 0.8;
-                            playerBody.velocity.z *= 0.8;
-                        }
+                    // 左スティック (axes[2], axes[3])
+                    if (source.gamepad.axes.length >= 4) {
+                        leftAxes.x = source.gamepad.axes[2];
+                        leftAxes.y = source.gamepad.axes[3];
                     }
                     
-                    // 左手Xボタン (ピラミッド発射)
+                    // Xボタン (button[4] on Quest 2 left controller)
                     if (currentMode === MODE.SANDBOX) {
-                        if (source.gamepad.buttons[3]?.pressed && !source.gamepad.buttons[3].wasPressed) {
+                        if (source.gamepad.buttons[4]?.pressed && !source.gamepad.buttons[4].wasPressed) {
                             spawnProp('pyramid');
-                            source.gamepad.buttons[3].wasPressed = true;
-                        } else if (!source.gamepad.buttons[3]?.pressed && source.gamepad.buttons[3]) {
-                            source.gamepad.buttons[3].wasPressed = false;
+                            source.gamepad.buttons[4].wasPressed = true;
+                        } else if (!source.gamepad.buttons[4]?.pressed && source.gamepad.buttons[4]) {
+                            source.gamepad.buttons[4].wasPressed = false;
                         }
                     }
                 }
 
-                // 右手: 回転 & アクション
+                // 右手コントローラー
                 if (source.handedness === 'right') {
-                    const axes = source.gamepad.axes;
-                    if (axes.length >= 4) {
-                        const turn = axes[2];
-                        if (Math.abs(turn) > 0.2) {
-                            dolly.rotation.y -= turn * 0.05 * TURN_SPEED;
-                        }
+                    // 右スティック (axes[2], axes[3])
+                    if (source.gamepad.axes.length >= 4) {
+                        rightAxes.x = source.gamepad.axes[2];
+                        rightAxes.y = source.gamepad.axes[3];
                     }
 
-                    // Aボタン: 球 / ジャンプ
+                    // Aボタン (button[4] on Quest 2 right controller)
                     if (source.gamepad.buttons[4]?.pressed && !source.gamepad.buttons[4].wasPressed) {
                         if (currentMode === MODE.SANDBOX) {
                             spawnProp('sphere');
-                        } else if (playerBody.position.y < 2.0) {
-                            playerBody.velocity.y = 8;
+                        } else {
+                            // ジャンプ機能（結界モード）
+                            playerBody.position.y += 0.5;
                         }
                         source.gamepad.buttons[4].wasPressed = true;
                     } else if (!source.gamepad.buttons[4]?.pressed && source.gamepad.buttons[4]) {
                         source.gamepad.buttons[4].wasPressed = false;
                     }
 
-                    // Bボタン: 円柱
+                    // Bボタン (button[5])
                     if (currentMode === MODE.SANDBOX) {
                         if (source.gamepad.buttons[5]?.pressed && !source.gamepad.buttons[5].wasPressed) {
                             spawnProp('cylinder');
@@ -403,6 +353,34 @@
                         }
                     }
                 }
+            }
+
+            // 移動処理（左スティック）
+            if (Math.abs(leftAxes.x) > 0.15 || Math.abs(leftAxes.y) > 0.15) {
+                const angle = dolly.rotation.y;
+                const forward = new THREE.Vector3(
+                    -Math.sin(angle),
+                    0,
+                    -Math.cos(angle)
+                );
+                const right = new THREE.Vector3(
+                    Math.cos(angle),
+                    0,
+                    -Math.sin(angle)
+                );
+
+                const moveVec = new THREE.Vector3();
+                moveVec.addScaledVector(right, leftAxes.x);
+                moveVec.addScaledVector(forward, leftAxes.y);
+                moveVec.normalize().multiplyScalar(MOVE_SPEED * timeStep);
+
+                playerBody.position.x += moveVec.x;
+                playerBody.position.z += moveVec.z;
+            }
+
+            // 回転処理（右スティック）
+            if (Math.abs(rightAxes.x) > 0.2) {
+                dolly.rotation.y -= rightAxes.x * TURN_SPEED * timeStep;
             }
         }
 
@@ -452,12 +430,14 @@
             const pos = ghostBarrier.position.clone();
             const rot = ghostBarrier.quaternion.clone();
             
+            // ★当たり判定なしの視覚的な結界
             const geo = new THREE.BoxGeometry(size.x, size.y, size.z);
             const mat = new THREE.MeshPhongMaterial({ 
                 color: 0x0088FF, 
                 transparent: true, 
-                opacity: 0.7, 
-                emissive: 0x001133 
+                opacity: 0.3, // より透明に
+                emissive: 0x001133,
+                side: THREE.DoubleSide
             });
             const mesh = new THREE.Mesh(geo, mat);
             mesh.position.copy(pos);
@@ -465,56 +445,161 @@
             
             const edges = new THREE.LineSegments(
                 new THREE.EdgesGeometry(geo), 
-                new THREE.LineBasicMaterial({ color: 0x00FFFF })
+                new THREE.LineBasicMaterial({ color: 0x00FFFF, linewidth: 2 })
             );
             mesh.add(edges);
             scene.add(mesh);
 
-            const body = new CANNON.Body({ 
-                mass: 0, 
-                shape: new CANNON.Box(new CANNON.Vec3(size.x/2, size.y/2, size.z/2)) 
+            // ★閉じ込められたオブジェクトを検出
+            const trappedObjects = [];
+            const barrierBox = new THREE.Box3().setFromObject(mesh);
+            
+            props.forEach(prop => {
+                const propPos = new THREE.Vector3().copy(prop.body.position);
+                if (barrierBox.containsPoint(propPos)) {
+                    trappedObjects.push(prop);
+                    // 閉じ込められた印（色変更）
+                    prop.mesh.material.emissive = new THREE.Color(0xff0000);
+                    prop.mesh.material.emissiveIntensity = 0.5;
+                }
             });
-            body.position.copy(pos);
-            body.quaternion.copy(rot);
-            world.addBody(body);
 
-            barriers.push({ mesh, body });
+            barriers.push({ 
+                mesh, 
+                body: null, // 当たり判定なし
+                trappedObjects: trappedObjects,
+                isActive: true,
+                boundingBox: barrierBox
+            });
+            
             scene.remove(ghostBarrier);
             ghostBarrier = null;
         }
 
-        // --- Elevator ---
-        function startElevator() {
-            const pos = playerBody.position.clone();
-            pos.y = 0.2;
-            const w = 1.5, d = 1.5, h = 0.2;
+        // --- Destruction (圧縮爆発) ---
+        function performDestruction() {
+            const worldPos = new THREE.Vector3();
+            const worldQuat = new THREE.Quaternion();
+            controller2.getWorldPosition(worldPos);
+            controller2.getWorldQuaternion(worldQuat);
             
-            const mesh = new THREE.Mesh(
-                new THREE.BoxGeometry(w, h, d), 
-                new THREE.MeshBasicMaterial({ 
-                    color: 0xFFD700, 
-                    opacity: 0.8, 
-                    transparent: true 
-                })
-            );
-            mesh.position.copy(pos);
-            scene.add(mesh);
+            const raycaster = new THREE.Raycaster();
+            raycaster.ray.origin.copy(worldPos);
+            raycaster.ray.direction.set(0, 0, -1).applyQuaternion(worldQuat);
+            raycaster.far = 20;
+
+            if (currentMode === MODE.BARRIER) {
+                // 結界を狙って圧縮爆発
+                const barrierMeshes = barriers.map(b => b.mesh);
+                const intersects = raycaster.intersectObjects(barrierMeshes, true);
+
+                if (intersects.length > 0) {
+                    const hit = intersects[0].object;
+                    const parent = hit.parent?.type === 'Mesh' ? hit.parent : hit;
+                    const index = barriers.findIndex(b => b.mesh === parent || b.mesh === hit);
+                    
+                    if (index > -1) {
+                        const barrier = barriers[index];
+                        
+                        // ★圧縮爆発エフェクト
+                        compressAndExplode(barrier);
+                        
+                        // 結界削除
+                        scene.remove(barrier.mesh);
+                        barriers.splice(index, 1);
+                        
+                        // 破壊エフェクト
+                        if (destructionRay) {
+                            destructionRay.material.opacity = 1.0;
+                            setTimeout(() => {
+                                if (destructionRay) destructionRay.material.opacity = isRightGripDown ? 0.6 : 0;
+                            }, 100);
+                        }
+                    }
+                }
+            } else {
+                // サンドボックスモードは通常の破壊
+                const meshes = props.map(t => t.mesh);
+                const intersects = raycaster.intersectObjects(meshes, true);
+
+                if (intersects.length > 0) {
+                    const hit = intersects[0].object;
+                    const index = props.findIndex(p => p.mesh === hit);
+                    
+                    if (index > -1) {
+                        const obj = props[index];
+                        scene.remove(obj.mesh);
+                        world.removeBody(obj.body);
+                        props.splice(index, 1);
+                    }
+                }
+            }
+        }
+
+        // ★圧縮爆発機能
+        function compressAndExplode(barrier) {
+            const center = barrier.mesh.position.clone();
+            const trapped = barrier.trappedObjects;
             
-            const body = new CANNON.Body({ 
-                mass: 0, 
-                type: CANNON.Body.KINEMATIC, 
-                shape: new CANNON.Box(new CANNON.Vec3(w/2, h/2, d/2)) 
+            if (trapped.length === 0) return;
+
+            // 圧縮フェーズ（0.3秒）
+            const compressDuration = 300;
+            const startTime = performance.now();
+            
+            const compressionInterval = setInterval(() => {
+                const elapsed = performance.now() - startTime;
+                const progress = Math.min(elapsed / compressDuration, 1);
+                
+                trapped.forEach(prop => {
+                    if (!prop.body || !prop.mesh) return;
+                    
+                    // 中心に向かって引き寄せる
+                    const toCenter = new THREE.Vector3().subVectors(center, prop.body.position);
+                    const force = toCenter.multiplyScalar(progress * 20);
+                    prop.body.velocity.copy(force);
+                    
+                    // 縮小エフェクト
+                    const scale = 1 - progress * 0.5;
+                    prop.mesh.scale.setScalar(scale);
+                });
+                
+                if (progress >= 1) {
+                    clearInterval(compressionInterval);
+                    // 爆発フェーズ
+                    explodeTrappedObjects(trapped, center);
+                }
+            }, 16);
+        }
+
+        function explodeTrappedObjects(trapped, center) {
+            trapped.forEach(prop => {
+                if (!prop.body || !prop.mesh) return;
+                
+                // 爆発方向
+                const explosionDir = new THREE.Vector3().subVectors(prop.body.position, center).normalize();
+                const explosionForce = explosionDir.multiplyScalar(30 + Math.random() * 20);
+                
+                prop.body.velocity.copy(explosionForce);
+                prop.body.angularVelocity.set(
+                    (Math.random() - 0.5) * 20,
+                    (Math.random() - 0.5) * 20,
+                    (Math.random() - 0.5) * 20
+                );
+                
+                // スケールを元に戻す
+                prop.mesh.scale.setScalar(1);
+                
+                // エミッシブをリセット
+                prop.mesh.material.emissive = new THREE.Color(0x000000);
+                prop.mesh.material.emissiveIntensity = 0;
             });
-            body.position.copy(pos);
-            world.addBody(body);
-            
-            activeElevator = { mesh, body };
         }
 
         // --- Sandbox Props ---
         function spawnProp(type) {
             const size = 0.4;
-            let geo, shape, mat, body;
+            let geo, shape, body;
             const color = Math.random() * 0xFFFFFF;
 
             const worldPos = new THREE.Vector3();
@@ -536,10 +621,9 @@
                 shape = new CANNON.Cylinder(0, size, size * 2, 4);
             }
 
-            mat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.2 });
+            const mat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.2 });
             const mesh = new THREE.Mesh(geo, mat);
             mesh.position.copy(spawnP);
-            mesh.castShadow = true;
             scene.add(mesh);
 
             body = new CANNON.Body({ mass: 20, shape: shape });
@@ -561,46 +645,10 @@
             }
         }
 
-        function performDestruction() {
-            const worldPos = new THREE.Vector3();
-            const worldQuat = new THREE.Quaternion();
-            controller2.getWorldPosition(worldPos);
-            controller2.getWorldQuaternion(worldQuat);
-            
-            const raycaster = new THREE.Raycaster();
-            raycaster.ray.origin.copy(worldPos);
-            raycaster.ray.direction.set(0, 0, -1).applyQuaternion(worldQuat);
-            raycaster.far = 20;
-
-            const targets = currentMode === MODE.BARRIER ? barriers : props;
-            const meshes = targets.map(t => t.mesh);
-            const intersects = raycaster.intersectObjects(meshes, true);
-
-            if (intersects.length > 0) {
-                const hit = intersects[0].object;
-                const parent = hit.parent?.type === 'Mesh' ? hit.parent : hit;
-                const index = targets.findIndex(t => t.mesh === parent || t.mesh === hit);
-                
-                if (index > -1) {
-                    const obj = targets[index];
-                    scene.remove(obj.mesh);
-                    world.removeBody(obj.body);
-                    targets.splice(index, 1);
-                    
-                    if (destructionRay) {
-                        destructionRay.material.opacity = 1.0;
-                        setTimeout(() => {
-                            if (destructionRay) destructionRay.material.opacity = isRightGripDown ? 0.6 : 0;
-                        }, 100);
-                    }
-                }
-            }
-        }
-
         function clearAllBarriers() {
             barriers.forEach(b => {
                 scene.remove(b.mesh);
-                world.removeBody(b.body);
+                if (b.body) world.removeBody(b.body);
             });
             barriers.length = 0;
         }
@@ -631,18 +679,14 @@
                 updateFormation(controller2.position);
             }
 
-            if (activeElevator) {
-                activeElevator.mesh.position.copy(activeElevator.body.position);
-                activeElevator.mesh.quaternion.copy(activeElevator.body.quaternion);
-            }
-
             props.forEach(p => {
-                p.mesh.position.copy(p.body.position);
-                p.mesh.quaternion.copy(p.body.quaternion);
+                if (p.body && p.mesh) {
+                    p.mesh.position.copy(p.body.position);
+                    p.mesh.quaternion.copy(p.body.quaternion);
+                }
             });
             
             dolly.position.copy(playerBody.position);
-            dolly.position.y -= 0.3;
 
             renderer.render(scene, camera);
         }
