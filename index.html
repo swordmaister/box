@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Kekkai Master VR v2.1</title>
+    <title>Kekkai Master VR v2.2</title>
     <style>
         body { margin: 0; overflow: hidden; background-color: #000; font-family: sans-serif; }
         canvas { display: block; width: 100%; height: 100%; }
@@ -62,7 +62,7 @@
         let playerBody;
         let activeElevator = null;
         let ghostBarrier = null;
-        let destructionRay = null; // 破壊レイの視覚表示用
+        let destructionRay = null;
 
         const MODE = { BARRIER: 'BARRIER', SANDBOX: 'SANDBOX' };
         let currentMode = MODE.BARRIER;
@@ -70,7 +70,7 @@
         // Input States
         let formationStartPos = new THREE.Vector3();
         let barrierOriginPos = new THREE.Vector3();
-        let barrierWorldRotation = new THREE.Quaternion(); // ★回転を記録
+        let barrierWorldRotation = new THREE.Quaternion();
         let isRightTriggerDown = false;
         let isRightGripDown = false;
         let gripStartTime = 0;
@@ -78,11 +78,11 @@
         // Configuration
         const SCALING_FACTOR = 100.0;
         const SPAWN_DISTANCE = 1.5;
-        const MOVE_SPEED = 6.0;
+        const MOVE_SPEED = 0.08; // ★フレーム単位の移動速度に変更
         const TURN_SPEED = 2.0;
 
         let canSwitchMode = true;
-        const clapThreshold = 0.15;
+        const clapThreshold = 0.25; // ★判定距離を少し広げた
 
         const modeDisplay = document.getElementById('mode-display');
         const infoText = document.getElementById('info-text');
@@ -127,7 +127,8 @@
                 mass: 70, 
                 shape: new CANNON.Sphere(0.3), 
                 material: physicsMat, 
-                fixedRotation: true 
+                fixedRotation: true,
+                linearDamping: 0.9 // ★減衰を追加
             });
             playerBody.position.set(0, 5, 0);
             world.addBody(playerBody);
@@ -166,7 +167,7 @@
             controllerGrip2.add(controllerModelFactory.createControllerModel(controllerGrip2));
             dolly.add(controllerGrip2);
 
-            // Ray Line (通常時は白、破壊時は赤)
+            // Ray Line
             const lineGeo = new THREE.BufferGeometry().setFromPoints([
                 new THREE.Vector3(0,0,0), 
                 new THREE.Vector3(0,0,-10)
@@ -178,7 +179,7 @@
             }));
             controller2.add(line);
 
-            // 破壊用レイ (より太く赤い)
+            // 破壊用レイ
             const rayGeo = new THREE.CylinderGeometry(0.01, 0.01, 10, 8);
             const rayMat = new THREE.MeshBasicMaterial({ 
                 color: 0xff0000, 
@@ -237,13 +238,11 @@
         function onRightTriggerEnd() {
             isRightTriggerDown = false;
             
-            // エレベーター停止
             if (activeElevator) {
                 activeElevator.body.velocity.set(0, 0, 0);
                 activeElevator = null;
             }
             
-            // 結界固定
             if (currentMode === MODE.BARRIER && ghostBarrier) {
                 finishFormation();
             }
@@ -253,7 +252,6 @@
             isRightGripDown = true;
             gripStartTime = performance.now();
             
-            // 破壊レイ表示
             if (destructionRay) {
                 destructionRay.material.opacity = 0.6;
             }
@@ -262,12 +260,10 @@
         function onRightGripEnd() {
             isRightGripDown = false;
             
-            // 破壊レイ非表示
             if (destructionRay) {
                 destructionRay.material.opacity = 0;
             }
             
-            // エレベーター停止
             if (activeElevator) {
                 activeElevator.body.velocity.set(0, 0, 0);
                 activeElevator = null;
@@ -275,11 +271,9 @@
 
             const duration = performance.now() - gripStartTime;
             
-            // 長押しで全消去
             if (duration > 800) {
                 currentMode === MODE.BARRIER ? clearAllBarriers() : clearAllProps();
             } else {
-                // 短押しで破壊
                 if (!activeElevator) performDestruction();
             }
         }
@@ -288,21 +282,25 @@
             const session = renderer.xr.getSession();
             if (!session) return;
 
-            // Mode Switch (Clap)
-            const dist = controller1.position.distanceTo(controller2.position);
+            // ★Mode Switch (Clap) - ワールド座標で判定
+            const worldPos1 = new THREE.Vector3();
+            const worldPos2 = new THREE.Vector3();
+            controller1.getWorldPosition(worldPos1);
+            controller2.getWorldPosition(worldPos2);
+            const dist = worldPos1.distanceTo(worldPos2);
+            
             if (dist < clapThreshold) {
                 if (canSwitchMode) {
                     switchMode();
                     canSwitchMode = false;
                 }
-            } else if (dist > 0.3) {
+            } else if (dist > 0.35) {
                 canSwitchMode = true;
             }
 
             // Elevator Logic
             if (currentMode === MODE.BARRIER) {
                 if (isRightTriggerDown && isRightGripDown) {
-                    // 結界生成キャンセル
                     if (ghostBarrier) {
                         scene.remove(ghostBarrier);
                         ghostBarrier = null;
@@ -312,17 +310,15 @@
                         startElevator();
                     }
                     
-                    // ★押している間だけ上昇
                     if (activeElevator) {
                         activeElevator.body.velocity.set(0, 4.0, 0);
                     }
                 } else if (activeElevator && !(isRightTriggerDown && isRightGripDown)) {
-                    // ★ボタンを離したら即座に停止
                     activeElevator.body.velocity.set(0, 0, 0);
                 }
             }
 
-            // Gamepad polling
+            // ★Gamepad polling - 移動処理を改善
             for (const source of session.inputSources) {
                 if (!source.gamepad) continue;
 
@@ -330,22 +326,37 @@
                 if (source.handedness === 'left') {
                     const axes = source.gamepad.axes;
                     if (axes.length >= 4) {
-                        const x = axes[2];
-                        const y = axes[3];
+                        const x = axes[2]; // 左右
+                        const y = axes[3]; // 前後
                         
                         if (Math.abs(x) > 0.1 || Math.abs(y) > 0.1) {
-                            // ★dollyの向きを基準に移動
+                            // dollyの向きを基準に移動ベクトル計算
                             const angle = dolly.rotation.y;
-                            const fwd = new THREE.Vector3(0, 0, -1).applyAxisAngle(new THREE.Vector3(0, 1, 0), angle);
-                            const right = new THREE.Vector3(1, 0, 0).applyAxisAngle(new THREE.Vector3(0, 1, 0), angle);
+                            const fwd = new THREE.Vector3(
+                                Math.sin(angle), 
+                                0, 
+                                Math.cos(angle)
+                            );
+                            const right = new THREE.Vector3(
+                                Math.cos(angle), 
+                                0, 
+                                -Math.sin(angle)
+                            );
                             
-                            const move = right.multiplyScalar(x).add(fwd.multiplyScalar(-y)).normalize().multiplyScalar(MOVE_SPEED);
+                            // ★移動方向を計算 (yは前方が負なので反転)
+                            const moveDir = new THREE.Vector3();
+                            moveDir.addScaledVector(right, x);
+                            moveDir.addScaledVector(fwd, -y);
+                            moveDir.normalize();
                             
-                            playerBody.velocity.x = move.x;
-                            playerBody.velocity.z = move.z;
+                            // ★物理ボディに直接力を加える
+                            const force = moveDir.multiplyScalar(MOVE_SPEED);
+                            playerBody.velocity.x = force.x;
+                            playerBody.velocity.z = force.z;
                         } else {
-                            playerBody.velocity.x *= 0.9;
-                            playerBody.velocity.z *= 0.9;
+                            // スティックを離したら減速
+                            playerBody.velocity.x *= 0.8;
+                            playerBody.velocity.z *= 0.8;
                         }
                     }
                     
@@ -397,7 +408,6 @@
 
         // --- Barrier Logic ---
         function startFormation() {
-            // ★ワールド座標で目の前1.5mに固定
             const worldPos = new THREE.Vector3();
             const worldQuat = new THREE.Quaternion();
             controller2.getWorldPosition(worldPos);
@@ -507,7 +517,6 @@
             let geo, shape, mat, body;
             const color = Math.random() * 0xFFFFFF;
 
-            // ★ワールド座標で目の前2mに発射
             const worldPos = new THREE.Vector3();
             const worldQuat = new THREE.Quaternion();
             camera.getWorldPosition(worldPos);
@@ -553,7 +562,6 @@
         }
 
         function performDestruction() {
-            // ★ワールド座標でレイキャスト (より正確)
             const worldPos = new THREE.Vector3();
             const worldQuat = new THREE.Quaternion();
             controller2.getWorldPosition(worldPos);
@@ -562,16 +570,13 @@
             const raycaster = new THREE.Raycaster();
             raycaster.ray.origin.copy(worldPos);
             raycaster.ray.direction.set(0, 0, -1).applyQuaternion(worldQuat);
-            
-            // ★範囲拡大 (遠くの物も破壊可能に)
             raycaster.far = 20;
 
             const targets = currentMode === MODE.BARRIER ? barriers : props;
             const meshes = targets.map(t => t.mesh);
-            const intersects = raycaster.intersectObjects(meshes, true); // 子オブジェクトも対象
+            const intersects = raycaster.intersectObjects(meshes, true);
 
             if (intersects.length > 0) {
-                // 最も近いオブジェクトを破壊
                 const hit = intersects[0].object;
                 const parent = hit.parent?.type === 'Mesh' ? hit.parent : hit;
                 const index = targets.findIndex(t => t.mesh === parent || t.mesh === hit);
@@ -582,7 +587,6 @@
                     world.removeBody(obj.body);
                     targets.splice(index, 1);
                     
-                    // 破壊エフェクト (一時的に赤く光る)
                     if (destructionRay) {
                         destructionRay.material.opacity = 1.0;
                         setTimeout(() => {
@@ -623,24 +627,20 @@
             world.step(timeStep);
             handleControllerInput();
 
-            // 結界形成中の更新
             if (currentMode === MODE.BARRIER && isRightTriggerDown && ghostBarrier && !isRightGripDown) {
                 updateFormation(controller2.position);
             }
 
-            // エレベーター位置同期
             if (activeElevator) {
                 activeElevator.mesh.position.copy(activeElevator.body.position);
                 activeElevator.mesh.quaternion.copy(activeElevator.body.quaternion);
             }
 
-            // Propsの物理同期
             props.forEach(p => {
                 p.mesh.position.copy(p.body.position);
                 p.mesh.quaternion.copy(p.body.quaternion);
             });
             
-            // プレイヤー位置同期
             dolly.position.copy(playerBody.position);
             dolly.position.y -= 0.3;
 
