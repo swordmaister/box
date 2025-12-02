@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Kekkai Sandbox VR</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: sans-serif; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; display: flex; flex-direction: column; justify-content: space-between; align-items: center; padding: 20px; box-sizing: border-box; }
+        
+        .hud-text { color: white; text-shadow: 0 0 5px black; text-align: center; }
+        #mode-display { font-size: 2em; font-weight: bold; padding: 10px 30px; border-radius: 10px; transition: background-color 0.5s, color 0.5s; }
+        
+        /* Mode Styles */
+        .mode-barrier { background-color: rgba(0, 50, 255, 0.5); color: #00FFFF; border: 2px solid #00FFFF; }
+        .mode-sandbox { background-color: rgba(255, 100, 0, 0.5); color: #FFD700; border: 2px solid #FFD700; }
+
+        #controls-info { font-size: 1.2em; background: rgba(0,0,0,0.5); padding: 15px; border-radius: 10px; }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <div id="mode-display" class="mode-barrier">🟦 結界師モード</div>
+        <div id="controls-info">
+            <div id="info-text">初期化中...</div>
+        </div>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.150.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.150.0/examples/jsm/",
+                "cannon-es": "https://unpkg.com/cannon-es@0.20.0/dist/cannon-es.js"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { VRButton } from 'three/addons/webxr/VRButton.js';
+        import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+        import * as CANNON from 'cannon-es';
+
+        // --- Global Variables ---
+        let scene, camera, renderer, world;
+        let controller1, controller2;
+        let controllerGrip1, controllerGrip2;
+        const dolly = new THREE.Group();
+        
+        // Physics Objects
+        const barriers = []; // Barriers (Static)
+        const props = [];    // Sandbox Objects (Dynamic)
+        let playerBody;
+        let activeElevator = null;
+        let ghostBarrier = null;
+
+        // State
+        const MODE = { BARRIER: 'BARRIER', SANDBOX: 'SANDBOX' };
+        let currentMode = MODE.BARRIER;
+        let formationStartPos = new THREE.Vector3();
+        let isRightTriggerDown = false;
+        let isRightGripDown = false;
+        let gripStartTime = 0;
+        
+        // Mode Switch Logic (Clap)
+        let canSwitchMode = true;
+        const clapThreshold = 0.15; // meters
+
+        // DOM Elements
+        const modeDisplay = document.getElementById('mode-display');
+        const infoText = document.getElementById('info-text');
+
+        // Constants
+        const timeStep = 1 / 60;
+        const maxProps = 100;
+
+        init();
+        animate();
+
+        function init() {
+            // 1. Scene & Camera
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x101020);
+            scene.fog = new THREE.FogExp2(0x101020, 0.02);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
+            dolly.position.set(0, 1.6, 0);
+            dolly.add(camera);
+            scene.add(dolly);
+
+            // 2. Physics
+            world = new CANNON.World();
+            world.gravity.set(0, -9.82, 0);
+            world.broadphase = new CANNON.SAPBroadphase(world);
+            
+            const physicsMat = new CANNON.Material();
+            const contactMat = new CANNON.ContactMaterial(physicsMat, physicsMat, { friction: 0.4, restitution: 0.3 });
+            world.addContactMaterial(contactMat);
+
+            // Ground
+            const groundBody = new CANNON.Body({ mass: 0, shape: new CANNON.Plane(), material: physicsMat });
+            groundBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
+            world.addBody(groundBody);
+
+            // Player (Kinematic for elevator interaction)
+            playerBody = new CANNON.Body({ mass: 70, shape: new CANNON.Sphere(0.3), material: physicsMat, fixedRotation: true });
+            playerBody.position.set(0, 5, 0);
+            world.addBody(playerBody);
+
+            // 3. Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.xr.enabled = true;
+            renderer.xr.setReferenceSpaceType('local-floor');
+            document.body.appendChild(renderer.domElement);
+            document.body.appendChild(VRButton.createButton(renderer));
+
+            // 4. Lighting & Env
+            const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
+            scene.add(hemiLight);
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            dirLight.position.set(10, 20, 10);
+            dirLight.castShadow = true;
+            scene.add(dirLight);
+
+            const gridHelper = new THREE.GridHelper(50, 50, 0x00ffff, 0x222222);
+            scene.add(gridHelper);
+
+            // 5. Controllers
+            controller1 = renderer.xr.getController(0); // Left
+            controller2 = renderer.xr.getController(1); // Right
+            dolly.add(controller1); dolly.add(controller2);
+
+            const controllerModelFactory = new XRControllerModelFactory();
+            controllerGrip1 = renderer.xr.getControllerGrip(0);
+            controllerGrip1.add(controllerModelFactory.createControllerModel(controllerGrip1));
+            dolly.add(controllerGrip1);
+            controllerGrip2 = renderer.xr.getControllerGrip(1);
+            controllerGrip2.add(controllerModelFactory.createControllerModel(controllerGrip2));
+            dolly.add(controllerGrip2);
+
+            // Raycaster Line (Right Hand)
+            const lineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0), new THREE.Vector3(0,0,-5)]);
+            const line = new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0xffffff }));
+            line.scale.z = 1;
+            controller2.add(line);
+
+            // Button Event Listeners (Discrete presses)
+            controller2.addEventListener('selectstart', onRightTriggerStart);
+            controller2.addEventListener('selectend', onRightTriggerEnd);
+            controller2.addEventListener('squeezestart', onRightGripStart);
+            controller2.addEventListener('squeezeend', onRightGripEnd);
+
+            // Initial UI
+            updateUI();
+            
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        // --- Mode Switching ---
+        function switchMode() {
+            if (currentMode === MODE.BARRIER) {
+                currentMode = MODE.SANDBOX;
+                scene.background = new THREE.Color(0x302010);
+                scene.fog = new THREE.FogExp2(0x302010, 0.015);
+            } else {
+                currentMode = MODE.BARRIER;
+                scene.background = new THREE.Color(0x101020);
+                scene.fog = new THREE.FogExp2(0x101020, 0.02);
+            }
+            updateUI();
+        }
+
+        function updateUI() {
+            if (currentMode === MODE.BARRIER) {
+                modeDisplay.innerText = "🟦 結界師モード";
+                modeDisplay.className = "mode-barrier";
+                infoText.innerHTML = "右トリガー: 錬成/結 | 右グリップ: 滅/解<br>同時押し: エレベーター | 👏: モード切替";
+            } else {
+                modeDisplay.innerText = "🟧 サンドボックス";
+                modeDisplay.className = "mode-sandbox";
+                infoText.innerHTML = "右A:球 右B:筒 左X:三角 | 右グリップ: 破壊<br>👏: モード切替";
+            }
+        }
+
+        // --- Interaction Logic ---
+
+        function onRightTriggerStart() {
+            if (currentMode === MODE.BARRIER) {
+                // Elevator check (Trigger + Grip)
+                if (isRightGripDown) {
+                    startElevator();
+                    return;
+                }
+                // Barrier Formation Start
+                startFormation(controller2.position);
+            }
+            isRightTriggerDown = true;
+        }
+
+        function onRightTriggerEnd() {
+            if (currentMode === MODE.BARRIER && isRightTriggerDown) {
+                finishFormation();
+            }
+            isRightTriggerDown = false;
+        }
+
+        function onRightGripStart() {
+            gripStartTime = performance.now();
+            isRightGripDown = true;
+
+            if (currentMode === MODE.BARRIER && isRightTriggerDown) {
+                startElevator();
+                return;
+            }
+        }
+
+        function onRightGripEnd() {
+            const duration = performance.now() - gripStartTime;
+            isRightGripDown = false;
+
+            // Long Press: Clear All
+            if (duration > 800) {
+                if (currentMode === MODE.BARRIER) {
+                    clearAllBarriers();
+                } else {
+                    clearAllProps();
+                }
+            } else {
+                // Short Press: Destroy Target
+                performDestruction();
+            }
+        }
+
+        // --- Gamepad Polling (Continuous Input) ---
+        function handleControllerInput() {
+            const session = renderer.xr.getSession();
+            if (!session) return;
+
+            // Check Clap (Mode Switch)
+            const p1 = controller1.position;
+            const p2 = controller2.position;
+            const dist = p1.distanceTo(p2);
+            
+            if (dist < clapThreshold) {
+                if (canSwitchMode) {
+                    switchMode();
+                    canSwitchMode = false;
+                    // Haptic Feedback
+                    if(session.inputSources[0]?.gamepad?.hapticActuators) session.inputSources[0].gamepad.hapticActuators[0].pulse(1.0, 50);
+                    if(session.inputSources[1]?.gamepad?.hapticActuators) session.inputSources[1].gamepad.hapticActuators[0].pulse(1.0, 50);
+                }
+            } else if (dist > 0.3) {
+                canSwitchMode = true; // Reset
+            }
+
+            // Button Inputs for Sandbox Spawning
+            for (const source of session.inputSources) {
+                if (!source.gamepad) continue;
+
+                // Right Hand Buttons (A=4, B=5)
+                if (source.handedness === 'right' && currentMode === MODE.SANDBOX) {
+                    // Button A: Sphere
+                    if (source.gamepad.buttons[4]?.pressed && !source.gamepad.buttons[4].wasPressed) {
+                        spawnProp('sphere', controller2.position, controller2.quaternion);
+                        source.gamepad.buttons[4].wasPressed = true;
+                    } else if (!source.gamepad.buttons[4]?.pressed) {
+                        if(source.gamepad.buttons[4]) source.gamepad.buttons[4].wasPressed = false;
+                    }
+
+                    // Button B: Cylinder
+                    if (source.gamepad.buttons[5]?.pressed && !source.gamepad.buttons[5].wasPressed) {
+                        spawnProp('cylinder', controller2.position, controller2.quaternion);
+                        source.gamepad.buttons[5].wasPressed = true;
+                    } else if (!source.gamepad.buttons[5]?.pressed) {
+                        if(source.gamepad.buttons[5]) source.gamepad.buttons[5].wasPressed = false;
+                    }
+                }
+
+                // Left Hand Buttons (X=3) - Standard Quest Mapping
+                if (source.handedness === 'left' && currentMode === MODE.SANDBOX) {
+                    if (source.gamepad.buttons[3]?.pressed && !source.gamepad.buttons[3].wasPressed) {
+                        spawnProp('pyramid', controller1.position, controller1.quaternion); // Spawn from left hand or right? Let's use left hand pos for left button
+                        source.gamepad.buttons[3].wasPressed = true;
+                    } else if (!source.gamepad.buttons[3]?.pressed) {
+                        if(source.gamepad.buttons[3]) source.gamepad.buttons[3].wasPressed = false;
+                    }
+                }
+                
+                // Stick Movement (Left Hand)
+                if (source.handedness === 'left') {
+                    const axes = source.gamepad.axes;
+                    if (axes.length >= 4) {
+                        const x = axes[2];
+                        const y = axes[3];
+                        if (Math.abs(x) > 0.1 || Math.abs(y) > 0.1) {
+                            const headRot = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ');
+                            const fwd = new THREE.Vector3(0,0,-1).applyAxisAngle(new THREE.Vector3(0,1,0), headRot.y);
+                            const right = new THREE.Vector3(1,0,0).applyAxisAngle(new THREE.Vector3(0,1,0), headRot.y);
+                            const move = right.multiplyScalar(x).add(fwd.multiplyScalar(y)).normalize().multiplyScalar(5.0);
+                            playerBody.velocity.x = move.x;
+                            playerBody.velocity.z = move.z;
+                        } else {
+                            playerBody.velocity.x *= 0.9;
+                            playerBody.velocity.z *= 0.9;
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- Barrier Logic ---
+        function startFormation(pos) {
+            formationStartPos.copy(pos);
+            const geo = new THREE.BoxGeometry(1, 1, 1);
+            const mat = new THREE.MeshBasicMaterial({ color: 0x00FFFF, transparent: true, opacity: 0.3, wireframe: true });
+            ghostBarrier = new THREE.Mesh(geo, mat);
+            ghostBarrier.position.copy(pos);
+            ghostBarrier.scale.set(0.1, 0.1, 0.1);
+            scene.add(ghostBarrier);
+        }
+
+        function updateFormation(pos) {
+            if (!ghostBarrier) return;
+            const center = new THREE.Vector3().addVectors(formationStartPos, pos).multiplyScalar(0.5);
+            ghostBarrier.position.copy(center);
+            const sx = Math.max(0.2, Math.abs(pos.x - formationStartPos.x));
+            const sy = Math.max(0.2, Math.abs(pos.y - formationStartPos.y));
+            const sz = Math.max(0.2, Math.abs(pos.z - formationStartPos.z));
+            ghostBarrier.scale.set(sx, sy, sz);
+        }
+
+        function finishFormation() {
+            if (!ghostBarrier) return;
+            const size = ghostBarrier.scale;
+            const pos = ghostBarrier.position.clone();
+            
+            // Visual
+            const geo = new THREE.BoxGeometry(size.x, size.y, size.z);
+            const mat = new THREE.MeshPhongMaterial({ color: 0x0088FF, transparent: true, opacity: 0.7, emissive: 0x001133 });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.copy(pos);
+            const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({ color: 0x00FFFF }));
+            mesh.add(edges);
+            scene.add(mesh);
+
+            // Physics
+            const body = new CANNON.Body({ mass: 0, shape: new CANNON.Box(new CANNON.Vec3(size.x/2, size.y/2, size.z/2)) });
+            body.position.copy(pos);
+            world.addBody(body);
+
+            barriers.push({ mesh, body });
+            scene.remove(ghostBarrier);
+            ghostBarrier = null;
+        }
+
+        // --- Sandbox Logic ---
+        function spawnProp(type, pos, quat) {
+            const size = 0.3;
+            let geo, shape, mat, body;
+            const color = Math.random() * 0xFFFFFF;
+
+            // Spawn slightly in front
+            const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(quat);
+            const spawnP = pos.clone().add(dir.multiplyScalar(0.5));
+
+            if (type === 'sphere') {
+                geo = new THREE.SphereGeometry(size);
+                shape = new CANNON.Sphere(size);
+            } else if (type === 'cylinder') {
+                geo = new THREE.CylinderGeometry(size, size, size*2, 16);
+                shape = new CANNON.Cylinder(size, size, size*2, 16);
+            } else if (type === 'pyramid') {
+                geo = new THREE.ConeGeometry(size, size*2, 4);
+                shape = new CANNON.Cylinder(0, size, size*2, 4); // Approx
+            }
+
+            mat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.2, metalness: 0.5 });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.copy(spawnP);
+            mesh.castShadow = true;
+            scene.add(mesh);
+
+            body = new CANNON.Body({ mass: 10, shape: shape });
+            body.position.copy(spawnP);
+            // Random spin
+            body.angularVelocity.set(Math.random(), Math.random(), Math.random());
+            world.addBody(body);
+
+            props.push({ mesh, body });
+
+            if(props.length > maxProps) {
+                const old = props.shift();
+                scene.remove(old.mesh);
+                world.removeBody(old.body);
+            }
+        }
+
+        // --- Elevator Logic ---
+        function startElevator() {
+            if (activeElevator) return;
+            const pos = playerBody.position.clone();
+            pos.y = 0;
+            const w=1.5, d=1.5, h=0.5;
+            
+            const mesh = new THREE.Mesh(new THREE.BoxGeometry(w,h,d), new THREE.MeshBasicMaterial({ color: 0xFFD700, wireframe:true }));
+            mesh.position.copy(pos);
+            scene.add(mesh);
+            
+            const body = new CANNON.Body({ mass: 0, type: CANNON.Body.KINEMATIC, shape: new CANNON.Box(new CANNON.Vec3(w/2, h/2, d/2)) });
+            body.position.copy(pos);
+            world.addBody(body);
+            
+            activeElevator = { mesh, body };
+        }
+
+        function updateElevator() {
+            if (activeElevator) {
+                activeElevator.body.velocity.set(0, 4, 0);
+                activeElevator.mesh.position.copy(activeElevator.body.position);
+                if (activeElevator.body.position.y > 30) {
+                    scene.remove(activeElevator.mesh);
+                    world.removeBody(activeElevator.body);
+                    activeElevator = null;
+                }
+            }
+        }
+
+        // --- Destruction (Raycast) ---
+        function performDestruction() {
+            const tempMatrix = new THREE.Matrix4();
+            tempMatrix.identity().extractRotation(controller2.matrixWorld);
+            const raycaster = new THREE.Raycaster();
+            raycaster.ray.origin.setFromMatrixPosition(controller2.matrixWorld);
+            raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+
+            // Determine targets based on mode
+            const targets = currentMode === MODE.BARRIER ? barriers : props;
+            const meshes = targets.map(t => t.mesh);
+            const intersects = raycaster.intersectObjects(meshes);
+
+            if (intersects.length > 0) {
+                const hit = intersects[0].object;
+                const index = targets.findIndex(t => t.mesh === hit);
+                if (index > -1) {
+                    const obj = targets[index];
+                    // Effect
+                    const fxGeo = new THREE.BoxGeometry(0.1,0.1,0.1);
+                    const fxMesh = new THREE.Mesh(fxGeo, new THREE.MeshBasicMaterial({color:0xff0000}));
+                    fxMesh.position.copy(obj.mesh.position);
+                    scene.add(fxMesh);
+                    setTimeout(() => scene.remove(fxMesh), 200);
+
+                    // Remove
+                    scene.remove(obj.mesh);
+                    world.removeBody(obj.body);
+                    targets.splice(index, 1);
+                }
+            }
+        }
+
+        function clearAllBarriers() {
+            barriers.forEach(b => { scene.remove(b.mesh); world.removeBody(b.body); });
+            barriers.length = 0;
+            if(activeElevator) { scene.remove(activeElevator.mesh); world.removeBody(activeElevator.body); activeElevator = null; }
+        }
+
+        function clearAllProps() {
+            props.forEach(p => { scene.remove(p.mesh); world.removeBody(p.body); });
+            props.length = 0;
+        }
+
+        // --- Main Loop ---
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            renderer.setAnimationLoop(render);
+        }
+
+        function render() {
+            world.step(timeStep);
+            handleControllerInput();
+
+            if (currentMode === MODE.BARRIER && isRightTriggerDown && ghostBarrier) {
+                updateFormation(controller2.position);
+            }
+
+            updateElevator();
+
+            // Sync Bodies
+            barriers.forEach(b => { /* Static, no update needed */ });
+            props.forEach(p => { p.mesh.position.copy(p.body.position); p.mesh.quaternion.copy(p.body.quaternion); });
+
+            // Sync Player View
+            dolly.position.copy(playerBody.position);
+            dolly.position.y -= 0.3; // Offset radius
+
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
