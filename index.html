@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Kekkai Sandbox VR</title>
+    <title>Kekkai Master VR - Hyper Scale</title>
     <style>
         body { margin: 0; overflow: hidden; background-color: #000; font-family: sans-serif; }
         canvas { display: block; width: 100%; height: 100%; }
@@ -12,7 +12,6 @@
         .hud-text { color: white; text-shadow: 0 0 5px black; text-align: center; }
         #mode-display { font-size: 2em; font-weight: bold; padding: 10px 30px; border-radius: 10px; transition: background-color 0.5s, color 0.5s; }
         
-        /* Mode Styles */
         .mode-barrier { background-color: rgba(0, 50, 255, 0.5); color: #00FFFF; border: 2px solid #00FFFF; }
         .mode-sandbox { background-color: rgba(255, 100, 0, 0.5); color: #FFD700; border: 2px solid #FFD700; }
 
@@ -22,7 +21,7 @@
 <body>
 
     <div id="ui-layer">
-        <div id="mode-display" class="mode-barrier">🟦 結界師モード</div>
+        <div id="mode-display" class="mode-barrier">🟦 結界師モード (倍率x100)</div>
         <div id="controls-info">
             <div id="info-text">初期化中...</div>
         </div>
@@ -50,30 +49,34 @@
         let controllerGrip1, controllerGrip2;
         const dolly = new THREE.Group();
         
-        // Physics Objects
-        const barriers = []; // Barriers (Static)
-        const props = [];    // Sandbox Objects (Dynamic)
+        const barriers = [];
+        const props = [];
         let playerBody;
         let activeElevator = null;
         let ghostBarrier = null;
 
-        // State
         const MODE = { BARRIER: 'BARRIER', SANDBOX: 'SANDBOX' };
         let currentMode = MODE.BARRIER;
-        let formationStartPos = new THREE.Vector3();
+        
+        // Barrier Formation State
+        let formationStartPos = new THREE.Vector3(); // コントローラーの始点
+        let barrierOriginPos = new THREE.Vector3();  // 結界の発生原点
         let isRightTriggerDown = false;
         let isRightGripDown = false;
         let gripStartTime = 0;
         
-        // Mode Switch Logic (Clap)
-        let canSwitchMode = true;
-        const clapThreshold = 0.15; // meters
+        // Settings
+        const SCALING_FACTOR = 80.0; // ★倍率設定 (動きの80倍)
+        const SPAWN_DISTANCE = 1.5;  // ★目の前に出す距離 (メートル)
+        const MOVE_SPEED = 6.0;
+        const TURN_SPEED = 2.0;
 
-        // DOM Elements
+        let canSwitchMode = true;
+        const clapThreshold = 0.15;
+
         const modeDisplay = document.getElementById('mode-display');
         const infoText = document.getElementById('info-text');
 
-        // Constants
         const timeStep = 1 / 60;
         const maxProps = 100;
 
@@ -81,7 +84,7 @@
         animate();
 
         function init() {
-            // 1. Scene & Camera
+            // Scene
             scene = new THREE.Scene();
             scene.background = new THREE.Color(0x101020);
             scene.fog = new THREE.FogExp2(0x101020, 0.02);
@@ -91,7 +94,7 @@
             dolly.add(camera);
             scene.add(dolly);
 
-            // 2. Physics
+            // Physics
             world = new CANNON.World();
             world.gravity.set(0, -9.82, 0);
             world.broadphase = new CANNON.SAPBroadphase(world);
@@ -105,12 +108,12 @@
             groundBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
             world.addBody(groundBody);
 
-            // Player (Kinematic for elevator interaction)
+            // Player
             playerBody = new CANNON.Body({ mass: 70, shape: new CANNON.Sphere(0.3), material: physicsMat, fixedRotation: true });
             playerBody.position.set(0, 5, 0);
             world.addBody(playerBody);
 
-            // 3. Renderer
+            // Renderer
             renderer = new THREE.WebGLRenderer({ antialias: true });
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.xr.enabled = true;
@@ -118,7 +121,7 @@
             document.body.appendChild(renderer.domElement);
             document.body.appendChild(VRButton.createButton(renderer));
 
-            // 4. Lighting & Env
+            // Lights
             const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
             scene.add(hemiLight);
             const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
@@ -129,9 +132,9 @@
             const gridHelper = new THREE.GridHelper(50, 50, 0x00ffff, 0x222222);
             scene.add(gridHelper);
 
-            // 5. Controllers
-            controller1 = renderer.xr.getController(0); // Left
-            controller2 = renderer.xr.getController(1); // Right
+            // Controllers
+            controller1 = renderer.xr.getController(0);
+            controller2 = renderer.xr.getController(1);
             dolly.add(controller1); dolly.add(controller2);
 
             const controllerModelFactory = new XRControllerModelFactory();
@@ -142,21 +145,18 @@
             controllerGrip2.add(controllerModelFactory.createControllerModel(controllerGrip2));
             dolly.add(controllerGrip2);
 
-            // Raycaster Line (Right Hand)
-            const lineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0), new THREE.Vector3(0,0,-5)]);
-            const line = new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0xffffff }));
-            line.scale.z = 1;
+            // Raycaster Line
+            const lineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0), new THREE.Vector3(0,0,-50)]); // 長くしました
+            const line = new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5 }));
             controller2.add(line);
 
-            // Button Event Listeners (Discrete presses)
+            // Events
             controller2.addEventListener('selectstart', onRightTriggerStart);
             controller2.addEventListener('selectend', onRightTriggerEnd);
             controller2.addEventListener('squeezestart', onRightGripStart);
             controller2.addEventListener('squeezeend', onRightGripEnd);
 
-            // Initial UI
             updateUI();
-            
             window.addEventListener('resize', onWindowResize);
         }
 
@@ -176,27 +176,25 @@
 
         function updateUI() {
             if (currentMode === MODE.BARRIER) {
-                modeDisplay.innerText = "🟦 結界師モード";
+                modeDisplay.innerText = "🟦 結界師モード (感度MAX)";
                 modeDisplay.className = "mode-barrier";
-                infoText.innerHTML = "右トリガー: 錬成/結 | 右グリップ: 滅/解<br>同時押し: エレベーター | 👏: モード切替";
+                infoText.innerHTML = "右トリガー: 錬成 | 右グリップ: 滅/解<br>同時: エレベーター | 左:移動(修正済) 右:回転";
             } else {
                 modeDisplay.innerText = "🟧 サンドボックス";
                 modeDisplay.className = "mode-sandbox";
-                infoText.innerHTML = "右A:球 右B:筒 左X:三角 | 右グリップ: 破壊<br>👏: モード切替";
+                infoText.innerHTML = "右A:球 右B:筒 左X:三角 (前方射出)<br>左:移動 右:回転";
             }
         }
 
-        // --- Interaction Logic ---
-
+        // --- Inputs ---
         function onRightTriggerStart() {
             if (currentMode === MODE.BARRIER) {
-                // Elevator check (Trigger + Grip)
                 if (isRightGripDown) {
                     startElevator();
                     return;
                 }
-                // Barrier Formation Start
-                startFormation(controller2.position);
+                // ★ 錬成開始位置を「コントローラーの場所」ではなく「目の前」に設定
+                startFormation(); 
             }
             isRightTriggerDown = true;
         }
@@ -211,7 +209,6 @@
         function onRightGripStart() {
             gripStartTime = performance.now();
             isRightGripDown = true;
-
             if (currentMode === MODE.BARRIER && isRightTriggerDown) {
                 startElevator();
                 return;
@@ -221,116 +218,150 @@
         function onRightGripEnd() {
             const duration = performance.now() - gripStartTime;
             isRightGripDown = false;
-
-            // Long Press: Clear All
             if (duration > 800) {
-                if (currentMode === MODE.BARRIER) {
-                    clearAllBarriers();
-                } else {
-                    clearAllProps();
-                }
+                currentMode === MODE.BARRIER ? clearAllBarriers() : clearAllProps();
             } else {
-                // Short Press: Destroy Target
                 performDestruction();
             }
         }
 
-        // --- Gamepad Polling (Continuous Input) ---
         function handleControllerInput() {
             const session = renderer.xr.getSession();
             if (!session) return;
 
-            // Check Clap (Mode Switch)
-            const p1 = controller1.position;
-            const p2 = controller2.position;
-            const dist = p1.distanceTo(p2);
-            
+            // Mode Switch (Clap)
+            const dist = controller1.position.distanceTo(controller2.position);
             if (dist < clapThreshold) {
                 if (canSwitchMode) {
                     switchMode();
                     canSwitchMode = false;
-                    // Haptic Feedback
-                    if(session.inputSources[0]?.gamepad?.hapticActuators) session.inputSources[0].gamepad.hapticActuators[0].pulse(1.0, 50);
-                    if(session.inputSources[1]?.gamepad?.hapticActuators) session.inputSources[1].gamepad.hapticActuators[0].pulse(1.0, 50);
                 }
             } else if (dist > 0.3) {
-                canSwitchMode = true; // Reset
+                canSwitchMode = true;
             }
 
-            // Button Inputs for Sandbox Spawning
+            // Input Sources
             for (const source of session.inputSources) {
                 if (!source.gamepad) continue;
 
-                // Right Hand Buttons (A=4, B=5)
-                if (source.handedness === 'right' && currentMode === MODE.SANDBOX) {
-                    // Button A: Sphere
-                    if (source.gamepad.buttons[4]?.pressed && !source.gamepad.buttons[4].wasPressed) {
-                        spawnProp('sphere', controller2.position, controller2.quaternion);
-                        source.gamepad.buttons[4].wasPressed = true;
-                    } else if (!source.gamepad.buttons[4]?.pressed) {
-                        if(source.gamepad.buttons[4]) source.gamepad.buttons[4].wasPressed = false;
-                    }
-
-                    // Button B: Cylinder
-                    if (source.gamepad.buttons[5]?.pressed && !source.gamepad.buttons[5].wasPressed) {
-                        spawnProp('cylinder', controller2.position, controller2.quaternion);
-                        source.gamepad.buttons[5].wasPressed = true;
-                    } else if (!source.gamepad.buttons[5]?.pressed) {
-                        if(source.gamepad.buttons[5]) source.gamepad.buttons[5].wasPressed = false;
-                    }
-                }
-
-                // Left Hand Buttons (X=3) - Standard Quest Mapping
-                if (source.handedness === 'left' && currentMode === MODE.SANDBOX) {
-                    if (source.gamepad.buttons[3]?.pressed && !source.gamepad.buttons[3].wasPressed) {
-                        spawnProp('pyramid', controller1.position, controller1.quaternion); // Spawn from left hand or right? Let's use left hand pos for left button
-                        source.gamepad.buttons[3].wasPressed = true;
-                    } else if (!source.gamepad.buttons[3]?.pressed) {
-                        if(source.gamepad.buttons[3]) source.gamepad.buttons[3].wasPressed = false;
-                    }
-                }
-                
-                // Stick Movement (Left Hand)
+                // --- Movement & Rotation ---
                 if (source.handedness === 'left') {
+                    // ★ 左スティック: 移動 (修正済み)
                     const axes = source.gamepad.axes;
                     if (axes.length >= 4) {
-                        const x = axes[2];
-                        const y = axes[3];
+                        const x = axes[2]; 
+                        const y = axes[3]; // 前:+1 後:-1 (通常) -> 反転が必要かどうか確認
+                        // 一般的なGamePad API: 前=-1, 後=+1
+                        // ここでは直感的に: 前に倒す(y<0) -> 前進
+                        
                         if (Math.abs(x) > 0.1 || Math.abs(y) > 0.1) {
                             const headRot = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ');
                             const fwd = new THREE.Vector3(0,0,-1).applyAxisAngle(new THREE.Vector3(0,1,0), headRot.y);
                             const right = new THREE.Vector3(1,0,0).applyAxisAngle(new THREE.Vector3(0,1,0), headRot.y);
-                            const move = right.multiplyScalar(x).add(fwd.multiplyScalar(y)).normalize().multiplyScalar(5.0);
+                            
+                            // ★ 修正: 前進は -y 方向にはたらくよう調整
+                            // yが-1(前)のとき、fwd方向に進む -> fwd.multiplyScalar(-y)
+                            const move = right.multiplyScalar(x).add(fwd.multiplyScalar(-y)).normalize().multiplyScalar(MOVE_SPEED);
+                            
                             playerBody.velocity.x = move.x;
                             playerBody.velocity.z = move.z;
                         } else {
                             playerBody.velocity.x *= 0.9;
                             playerBody.velocity.z *= 0.9;
                         }
+
+                        // 左手Xボタン (三角)
+                        if (currentMode === MODE.SANDBOX) {
+                             if (source.gamepad.buttons[3]?.pressed && !source.gamepad.buttons[3].wasPressed) {
+                                spawnProp('pyramid');
+                                source.gamepad.buttons[3].wasPressed = true;
+                            } else if (!source.gamepad.buttons[3]?.pressed) {
+                                if(source.gamepad.buttons[3]) source.gamepad.buttons[3].wasPressed = false;
+                            }
+                        }
+                    }
+                }
+
+                if (source.handedness === 'right') {
+                    // ★ 右スティック: 回転 (新規追加)
+                    const axes = source.gamepad.axes;
+                    if (axes.length >= 4) {
+                        const turn = axes[2]; // X軸
+                        if (Math.abs(turn) > 0.2) {
+                            dolly.rotation.y -= turn * 0.05 * TURN_SPEED;
+                        }
+                    }
+
+                    // Aボタン: ジャンプ / 球
+                    if (source.gamepad.buttons[4]?.pressed && !source.gamepad.buttons[4].wasPressed) {
+                        if (currentMode === MODE.SANDBOX) {
+                            spawnProp('sphere');
+                        } else {
+                            // Jump
+                            if(playerBody.position.y < 1.0) playerBody.velocity.y = 8;
+                        }
+                        source.gamepad.buttons[4].wasPressed = true;
+                    } else if (!source.gamepad.buttons[4]?.pressed) {
+                        if(source.gamepad.buttons[4]) source.gamepad.buttons[4].wasPressed = false;
+                    }
+
+                    // Bボタン: 筒
+                    if (currentMode === MODE.SANDBOX) {
+                         if (source.gamepad.buttons[5]?.pressed && !source.gamepad.buttons[5].wasPressed) {
+                            spawnProp('cylinder');
+                            source.gamepad.buttons[5].wasPressed = true;
+                        } else if (!source.gamepad.buttons[5]?.pressed) {
+                            if(source.gamepad.buttons[5]) source.gamepad.buttons[5].wasPressed = false;
+                        }
+                    } else {
+                        // Barrier Mode Jump (Alternative on A/B)
+                         if (source.gamepad.buttons[4]?.pressed && playerBody.position.y < 1.0) {
+                            playerBody.velocity.y = 8;
+                        }
                     }
                 }
             }
         }
 
-        // --- Barrier Logic ---
-        function startFormation(pos) {
-            formationStartPos.copy(pos);
+        // --- Barrier Logic (Hyper Scale) ---
+        function startFormation() {
+            // ★ 目の前に発生させる
+            const direction = new THREE.Vector3(0, 0, -1).applyQuaternion(controller2.quaternion);
+            barrierOriginPos.copy(controller2.position).add(direction.multiplyScalar(SPAWN_DISTANCE));
+            
+            // コントローラーの現在の位置を基準点として保存
+            formationStartPos.copy(controller2.position);
+
             const geo = new THREE.BoxGeometry(1, 1, 1);
             const mat = new THREE.MeshBasicMaterial({ color: 0x00FFFF, transparent: true, opacity: 0.3, wireframe: true });
             ghostBarrier = new THREE.Mesh(geo, mat);
-            ghostBarrier.position.copy(pos);
+            ghostBarrier.position.copy(barrierOriginPos);
             ghostBarrier.scale.set(0.1, 0.1, 0.1);
             scene.add(ghostBarrier);
         }
 
-        function updateFormation(pos) {
+        function updateFormation(controllerPos) {
             if (!ghostBarrier) return;
-            const center = new THREE.Vector3().addVectors(formationStartPos, pos).multiplyScalar(0.5);
-            ghostBarrier.position.copy(center);
-            const sx = Math.max(0.2, Math.abs(pos.x - formationStartPos.x));
-            const sy = Math.max(0.2, Math.abs(pos.y - formationStartPos.y));
-            const sz = Math.max(0.2, Math.abs(pos.z - formationStartPos.z));
-            ghostBarrier.scale.set(sx, sy, sz);
+
+            // ★ コントローラーの移動量 (Delta) を計算
+            const delta = new THREE.Vector3().subVectors(controllerPos, formationStartPos);
+            
+            // ★ 爆発的なスケーリング (絶対値で広がる)
+            // X, Y, Z それぞれの動きに合わせて拡大
+            const scaleX = Math.max(0.2, Math.abs(delta.x) * SCALING_FACTOR);
+            const scaleY = Math.max(0.2, Math.abs(delta.y) * SCALING_FACTOR);
+            const scaleZ = Math.max(0.2, Math.abs(delta.z) * SCALING_FACTOR);
+
+            ghostBarrier.scale.set(scaleX, scaleY, scaleZ);
+
+            // ★ 拡大しても「原点」はズラさない（あるいはドラッグ方向に伸ばす）
+            // ここでは「原点中心に広がる」挙動にします（結界っぽいので）
+            // ドラッグした方向に伸ばしたい場合は position を delta * factor / 2 ずらす必要がありますが、
+            // 視線の先で膨張する方が扱いやすいです。
+            
+            // 補正: コントローラーを右にやったら右に伸びるように中心点を移動
+            const offset = delta.clone().multiplyScalar(SCALING_FACTOR / 2);
+            ghostBarrier.position.copy(barrierOriginPos).add(offset);
         }
 
         function finishFormation() {
@@ -338,7 +369,6 @@
             const size = ghostBarrier.scale;
             const pos = ghostBarrier.position.clone();
             
-            // Visual
             const geo = new THREE.BoxGeometry(size.x, size.y, size.z);
             const mat = new THREE.MeshPhongMaterial({ color: 0x0088FF, transparent: true, opacity: 0.7, emissive: 0x001133 });
             const mesh = new THREE.Mesh(geo, mat);
@@ -347,7 +377,6 @@
             mesh.add(edges);
             scene.add(mesh);
 
-            // Physics
             const body = new CANNON.Body({ mass: 0, shape: new CANNON.Box(new CANNON.Vec3(size.x/2, size.y/2, size.z/2)) });
             body.position.copy(pos);
             world.addBody(body);
@@ -357,15 +386,17 @@
             ghostBarrier = null;
         }
 
-        // --- Sandbox Logic ---
-        function spawnProp(type, pos, quat) {
-            const size = 0.3;
+        // --- Sandbox Logic (Projectile Spawn) ---
+        function spawnProp(type) {
+            const size = 0.5;
             let geo, shape, mat, body;
             const color = Math.random() * 0xFFFFFF;
 
-            // Spawn slightly in front
-            const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(quat);
-            const spawnP = pos.clone().add(dir.multiplyScalar(0.5));
+            // ★ 目の前から発射
+            const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(controller2.quaternion); // 右手基準
+            // 左手ボタン(ピラミッド)の場合は左手から出したいが、操作の統一感のため右手方向またはカメラ方向推奨。
+            // ここでは簡易的に全て「右手の向きの1.5m先」に出します。
+            const spawnP = controller2.position.clone().add(dir.clone().multiplyScalar(1.5));
 
             if (type === 'sphere') {
                 geo = new THREE.SphereGeometry(size);
@@ -375,7 +406,7 @@
                 shape = new CANNON.Cylinder(size, size, size*2, 16);
             } else if (type === 'pyramid') {
                 geo = new THREE.ConeGeometry(size, size*2, 4);
-                shape = new CANNON.Cylinder(0, size, size*2, 4); // Approx
+                shape = new CANNON.Cylinder(0, size, size*2, 4); 
             }
 
             mat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.2, metalness: 0.5 });
@@ -384,14 +415,15 @@
             mesh.castShadow = true;
             scene.add(mesh);
 
-            body = new CANNON.Body({ mass: 10, shape: shape });
+            body = new CANNON.Body({ mass: 20, shape: shape });
             body.position.copy(spawnP);
-            // Random spin
+            // 投げ出す速度を与える
+            const shootForce = 15; 
+            body.velocity.set(dir.x * shootForce, dir.y * shootForce + 2, dir.z * shootForce);
             body.angularVelocity.set(Math.random(), Math.random(), Math.random());
             world.addBody(body);
 
             props.push({ mesh, body });
-
             if(props.length > maxProps) {
                 const old = props.shift();
                 scene.remove(old.mesh);
@@ -399,29 +431,26 @@
             }
         }
 
-        // --- Elevator Logic ---
+        // --- Elevator ---
         function startElevator() {
             if (activeElevator) return;
             const pos = playerBody.position.clone();
             pos.y = 0;
             const w=1.5, d=1.5, h=0.5;
-            
             const mesh = new THREE.Mesh(new THREE.BoxGeometry(w,h,d), new THREE.MeshBasicMaterial({ color: 0xFFD700, wireframe:true }));
             mesh.position.copy(pos);
             scene.add(mesh);
-            
             const body = new CANNON.Body({ mass: 0, type: CANNON.Body.KINEMATIC, shape: new CANNON.Box(new CANNON.Vec3(w/2, h/2, d/2)) });
             body.position.copy(pos);
             world.addBody(body);
-            
             activeElevator = { mesh, body };
         }
 
         function updateElevator() {
             if (activeElevator) {
-                activeElevator.body.velocity.set(0, 4, 0);
+                activeElevator.body.velocity.set(0, 6, 0); // Fast elevator
                 activeElevator.mesh.position.copy(activeElevator.body.position);
-                if (activeElevator.body.position.y > 30) {
+                if (activeElevator.body.position.y > 50) {
                     scene.remove(activeElevator.mesh);
                     world.removeBody(activeElevator.body);
                     activeElevator = null;
@@ -429,7 +458,7 @@
             }
         }
 
-        // --- Destruction (Raycast) ---
+        // --- Destruction ---
         function performDestruction() {
             const tempMatrix = new THREE.Matrix4();
             tempMatrix.identity().extractRotation(controller2.matrixWorld);
@@ -437,7 +466,6 @@
             raycaster.ray.origin.setFromMatrixPosition(controller2.matrixWorld);
             raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
 
-            // Determine targets based on mode
             const targets = currentMode === MODE.BARRIER ? barriers : props;
             const meshes = targets.map(t => t.mesh);
             const intersects = raycaster.intersectObjects(meshes);
@@ -447,14 +475,17 @@
                 const index = targets.findIndex(t => t.mesh === hit);
                 if (index > -1) {
                     const obj = targets[index];
-                    // Effect
-                    const fxGeo = new THREE.BoxGeometry(0.1,0.1,0.1);
-                    const fxMesh = new THREE.Mesh(fxGeo, new THREE.MeshBasicMaterial({color:0xff0000}));
+                    // Explosion Effect
+                    const fxGeo = new THREE.SphereGeometry(0.5);
+                    const fxMesh = new THREE.Mesh(fxGeo, new THREE.MeshBasicMaterial({color:0xFF0000, transparent:true}));
                     fxMesh.position.copy(obj.mesh.position);
                     scene.add(fxMesh);
-                    setTimeout(() => scene.remove(fxMesh), 200);
+                    let scale = 1;
+                    const anim = setInterval(()=>{
+                        scale *= 1.1; fxMesh.scale.setScalar(scale); fxMesh.material.opacity -= 0.1;
+                        if(fxMesh.material.opacity<=0) { clearInterval(anim); scene.remove(fxMesh); }
+                    }, 30);
 
-                    // Remove
                     scene.remove(obj.mesh);
                     world.removeBody(obj.body);
                     targets.splice(index, 1);
@@ -462,16 +493,8 @@
             }
         }
 
-        function clearAllBarriers() {
-            barriers.forEach(b => { scene.remove(b.mesh); world.removeBody(b.body); });
-            barriers.length = 0;
-            if(activeElevator) { scene.remove(activeElevator.mesh); world.removeBody(activeElevator.body); activeElevator = null; }
-        }
-
-        function clearAllProps() {
-            props.forEach(p => { scene.remove(p.mesh); world.removeBody(p.body); });
-            props.length = 0;
-        }
+        function clearAllBarriers() { barriers.forEach(b => { scene.remove(b.mesh); world.removeBody(b.body); }); barriers.length = 0; }
+        function clearAllProps() { props.forEach(p => { scene.remove(p.mesh); world.removeBody(p.body); }); props.length = 0; }
 
         // --- Main Loop ---
         function onWindowResize() {
@@ -494,13 +517,11 @@
 
             updateElevator();
 
-            // Sync Bodies
-            barriers.forEach(b => { /* Static, no update needed */ });
             props.forEach(p => { p.mesh.position.copy(p.body.position); p.mesh.quaternion.copy(p.body.quaternion); });
-
+            
             // Sync Player View
             dolly.position.copy(playerBody.position);
-            dolly.position.y -= 0.3; // Offset radius
+            dolly.position.y -= 0.3; 
 
             renderer.render(scene, camera);
         }
